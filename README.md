@@ -24,3 +24,4 @@ Phased build plan:
 - Phase 2: externalize detection rules into a config file instead of hardcoded checks
 - Phase 3: multi-device spoofing support
 - Phase 4: localhost web dashboard (Flask/FastAPI + websocket) replacing/extending the terminal UI
+  l
