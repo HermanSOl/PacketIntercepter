@@ -9,6 +9,8 @@ from detection_engine import (
     FtpRule,
     HttpAlert,
     HttpRule,
+    MailAlert,
+    MailRule,
     TelnetAlert,
     TelnetRule,
 )
@@ -118,6 +120,35 @@ class TestDnsRule:
         # DNS-over-TCP exists but isn't covered by this rule
         pkt = make_packet(protocol="TCP", dport=53)
         assert DnsRule().check(pkt) is None
+
+
+class TestMailRule:
+    def test_flags_smtp_traffic_on_port_25(self):
+        pkt = make_packet(dport=25)
+        alert = MailRule().check(pkt)
+
+        assert isinstance(alert, MailAlert)
+        assert alert.pkt is pkt
+
+    def test_flags_pop3_traffic_on_port_110(self):
+        pkt = make_packet(dport=110)
+        assert isinstance(MailRule().check(pkt), MailAlert)
+
+    def test_flags_imap_traffic_on_port_143(self):
+        pkt = make_packet(dport=143)
+        assert isinstance(MailRule().check(pkt), MailAlert)
+
+    def test_flags_traffic_when_mail_port_is_source(self):
+        pkt = make_packet(sport=25, dport=54321)
+        assert isinstance(MailRule().check(pkt), MailAlert)
+
+    def test_ignores_tcp_traffic_on_other_ports(self):
+        pkt = make_packet(sport=1111, dport=443)
+        assert MailRule().check(pkt) is None
+
+    def test_ignores_udp_traffic_on_mail_ports(self):
+        pkt = make_packet(protocol="UDP", dport=25)
+        assert MailRule().check(pkt) is None
 
 
 class TestAlertHandler:

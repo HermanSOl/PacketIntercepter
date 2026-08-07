@@ -11,7 +11,18 @@ from unittest.mock import Mock
 import pytest
 from scapy.all import ARP, ICMP, IP, TCP, UDP, Ether, Raw
 
-from detection_engine import DnsAlert, DnsRule, FtpAlert, FtpRule, HttpAlert, HttpRule, TelnetAlert, TelnetRule
+from detection_engine import (
+    DnsAlert,
+    DnsRule,
+    FtpAlert,
+    FtpRule,
+    HttpAlert,
+    HttpRule,
+    MailAlert,
+    MailRule,
+    TelnetAlert,
+    TelnetRule,
+)
 from pkt_capture_parse import Packet, Sniffer
 
 
@@ -222,4 +233,13 @@ class TestScapyPacketTripsDetectionRules:
         alert = DnsRule().check(summary)
 
         assert isinstance(alert, DnsAlert)
+        assert alert.pkt is summary
+
+    def test_smtp_traffic_trips_mail_rule(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=54321, dport=25) / Raw(b"MAIL FROM:<a@b.com>"))
+        summary = Packet.sum_from_scapy(pkt)
+
+        alert = MailRule().check(summary)
+
+        assert isinstance(alert, MailAlert)
         assert alert.pkt is summary

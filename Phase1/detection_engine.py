@@ -42,6 +42,9 @@ class TelnetAlert(SusAlert):
 class DnsAlert(SusAlert):
     pass
 
+class MailAlert(SusAlert):
+    pass
+
 
 # --- Rules ------------------------------------------------------------------
 
@@ -87,6 +90,17 @@ class DnsRule(DetectionRule):
             return DnsAlert(pkt, "Unencrypted DNS query - reveals browsing activity and is trivially spoofable")
         return None
 
+class MailRule(DetectionRule):
+    PORTS = {25: "SMTP", 110: "POP3", 143: "IMAP"}
+
+    def check(self, pkt: Packet) -> SusAlert | None:
+        if pkt.protocol != "TCP":
+            return None
+        for port in (pkt.sport, pkt.dport):
+            name = self.PORTS.get(port)
+            if name:
+                return MailAlert(pkt, f"Unencrypted {name} traffic - mail content/credentials exposed")
+        return None
 
 class AlertHandler:
     def __init__(self, maxlen: int = 500):
