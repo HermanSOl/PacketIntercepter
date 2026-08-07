@@ -129,14 +129,21 @@ class TestMailRule:
 
         assert isinstance(alert, MailAlert)
         assert alert.pkt is pkt
+        assert "SMTP" in alert.reason
 
     def test_flags_pop3_traffic_on_port_110(self):
         pkt = make_packet(dport=110)
-        assert isinstance(MailRule().check(pkt), MailAlert)
+        alert = MailRule().check(pkt)
+
+        assert isinstance(alert, MailAlert)
+        assert "POP3" in alert.reason
 
     def test_flags_imap_traffic_on_port_143(self):
         pkt = make_packet(dport=143)
-        assert isinstance(MailRule().check(pkt), MailAlert)
+        alert = MailRule().check(pkt)
+
+        assert isinstance(alert, MailAlert)
+        assert "IMAP" in alert.reason
 
     def test_flags_traffic_when_mail_port_is_source(self):
         pkt = make_packet(sport=25, dport=54321)

@@ -243,3 +243,21 @@ class TestScapyPacketTripsDetectionRules:
 
         assert isinstance(alert, MailAlert)
         assert alert.pkt is summary
+
+    def test_pop3_traffic_trips_mail_rule(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=54321, dport=110) / Raw(b"USER admin\r\n"))
+        summary = Packet.sum_from_scapy(pkt)
+
+        alert = MailRule().check(summary)
+
+        assert isinstance(alert, MailAlert)
+        assert alert.pkt is summary
+
+    def test_imap_traffic_trips_mail_rule(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=54321, dport=143) / Raw(b"a LOGIN admin pass\r\n"))
+        summary = Packet.sum_from_scapy(pkt)
+
+        alert = MailRule().check(summary)
+
+        assert isinstance(alert, MailAlert)
+        assert alert.pkt is summary
