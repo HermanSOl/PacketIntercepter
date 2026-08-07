@@ -35,6 +35,14 @@ class FtpAlert(SusAlert):
     pass
 
 
+class TelnetAlert(SusAlert):
+    pass
+
+
+class DnsAlert(SusAlert):
+    pass
+
+
 # --- Rules ------------------------------------------------------------------
 
 # Plaintext HTTP traffic (port 80, no TLS)
@@ -57,6 +65,26 @@ class FtpRule(DetectionRule):
             return None
         if any(pkt.payload.startswith(marker) for marker in self.CREDENTIAL_MARKERS):
             return FtpAlert(pkt, "FTP USER/PASS sent in cleartext - credentials exposed")
+        return None
+
+
+# Telnet session (entire session, including login, is cleartext)
+class TelnetRule(DetectionRule):
+    PORT = 23
+
+    def check(self, pkt: Packet) -> SusAlert | None:
+        if pkt.protocol == "TCP" and self.PORT in (pkt.sport, pkt.dport):
+            return TelnetAlert(pkt, "Telnet session - entire session including login is cleartext")
+        return None
+
+
+# Unencrypted DNS query (plain port 53)
+class DnsRule(DetectionRule):
+    PORT = 53
+
+    def check(self, pkt: Packet) -> SusAlert | None:
+        if pkt.protocol == "UDP" and self.PORT in (pkt.sport, pkt.dport):
+            return DnsAlert(pkt, "Unencrypted DNS query - reveals browsing activity and is trivially spoofable")
         return None
 
 
