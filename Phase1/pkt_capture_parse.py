@@ -32,14 +32,14 @@ class Sniffer:
         on_error: Callable[[Exception], None] | None = None,
     ):
        self.interface = interface
-       self.rules = rules # seperate rules for when the packet should be captured
+       self.rules = rules
        self.on_sus = on_sus # function called on capture
-       self.on_error = on_error # optional callback for errors raised inside the sniffer thread
+       self.on_error = on_error
        self._thread: threading.Thread | None = None # needs a seperate thread apart from spoofing,etc.
-       self._error: Exception | None = None # last error raised inside start_sniffer, if any
+       self._error: Exception | None = None
        self.end = False
 
-    # Initializes thread + start_sniffer
+
     def start(self):
         self._thread = threading.Thread(target=self.start_sniffer, daemon = True)
         self._thread.start()
@@ -50,9 +50,9 @@ class Sniffer:
         try:
             sniff(iface = self.interface, prn = self.digest, store = False, stop_filter = lambda _: self.end)
         except (PermissionError, OSError) as exc:
-            # e.g. unknown/down interface, or not running with capture privileges
+            # unknown/down interface, or not running with correct privileges
             self._handle_error(InterfaceError(f"Unable to sniff on interface {self.interface!r}: {exc}"))
-        except Exception as exc:  # last resort: never let the capture thread die silently
+        except Exception as exc: 
             self._handle_error(SnifferError(f"Unexpected error while sniffing on {self.interface!r}: {exc}"))
 
     # Records/reports an error raised inside the sniffer thread instead of letting it vanish
@@ -89,7 +89,6 @@ class Sniffer:
                     logger.exception("on_sus handler raised while reporting an alert")
         return packet_summary
 
-    # Stops the sniffer and kills the Thread
     def stop(self):
         self.end = True
         if self._thread:
@@ -112,7 +111,7 @@ class Packet:
     @classmethod
     def sum_from_scapy(cls, raw_packet) -> "Packet | None":
         if not raw_packet.haslayer(IP):
-            return None  # nothing at step 4 needs non-IP packets
+            return None  
 
         try:
             ip_layer = raw_packet[IP]
@@ -146,6 +145,5 @@ class Packet:
             )
         except Exception as exc:
             # Malformed/truncated packets are expected on the wire (since this packet might be  the attackers)
-
             raise PacketParseError(f"Failed to parse captured packet: {exc}") from exc
 
