@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 from scapy.all import ARP, ICMP, IP, TCP, UDP, Ether, Raw
 
+from detection_engine import FtpAlert, FtpRule, HttpAlert, HttpRule
 from pkt_capture_parse import Packet, Sniffer
 
 
@@ -179,3 +180,28 @@ class TestSnifferLifecycle:
 
         assert sniffer.end is True
         assert not sniffer._thread.is_alive()
+
+
+class TestScapyPacketTripsDetectionRules:
+    """End-to-end check that a real scapy-built packet, parsed by
+    Packet.sum_from_scapy(), actually trips the matching detection rule -
+    HttpRule/FtpRule are unit-tested against a hand-built Packet in
+    test_detection_engine.py; these confirm the two stages chain together."""
+
+    def test_http_request_trips_http_rule(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=54321, dport=80) / Raw(b"GET / HTTP/1.1"))
+        summary = Packet.sum_from_scapy(pkt)
+
+        alert = HttpRule().check(summary)
+
+        assert isinstance(alert, HttpAlert)
+        assert alert.pkt is summary
+
+    def test_ftp_login_trips_ftp_rule(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=54321, dport=21) / Raw(b"USER admin\r\n"))
+        summary = Packet.sum_from_scapy(pkt)
+
+        alert = FtpRule().check(summary)
+
+        assert isinstance(alert, FtpAlert)
+        assert alert.pkt is summary
