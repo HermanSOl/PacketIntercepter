@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections import Counter
 from unittest.mock import Mock
 
 import pytest
 from scapy.all import ARP, Ether
 
-from arp_spoof import ArpSpoofer, MacResolutionError, SpoofSendError
+from arp_spoof import ArpSpoofer, ArpSpoofError, MacResolutionError, SpoofSendError
 
 
 def make_spoofer(**overrides):
@@ -140,3 +141,180 @@ class TestPoison:
         spoofer.poison()
 
         assert spoofer.send.call_count == 2
+
+
+class TestRestore:
+    def test_does_nothing_when_neither_mac_resolved(self):
+        spoofer = make_spoofer(target_mac=None, gateway_mac=None)
+        spoofer.send = Mock()
+
+        spoofer.restore()
+
+        spoofer.send.assert_not_called()
+
+    def test_does_nothing_when_only_one_mac_resolved(self):
+        spoofer = make_spoofer(gateway_mac=None)
+        spoofer.send = Mock()
+
+        spoofer.restore()
+
+        spoofer.send.assert_not_called()
+
+    def test_sends_corrective_replies_with_real_macs_three_times_each(self):
+        spoofer = make_spoofer()
+        spoofer.send = Mock()
+
+        spoofer.restore()
+
+        assert spoofer.send.call_count == 6
+        calls = Counter(
+            (call.kwargs["dst_mac"], call.kwargs["spoofed_ip"], call.kwargs["real_dst_ip"], call.kwargs["src_mac"])
+            for call in spoofer.send.call_args_list
+        )
+        # tells the target the gateway's *real* MAC (not ours)
+        assert calls[("aa:aa:aa:aa:aa:aa", "10.0.0.1", "10.0.0.5", "bb:bb:bb:bb:bb:bb")] == 3
+        # tells the gateway the target's *real* MAC (not ours)
+        assert calls[("bb:bb:bb:bb:bb:bb", "10.0.0.5", "10.0.0.1", "aa:aa:aa:aa:aa:aa")] == 3
+
+    def test_routes_spoof_send_error_to_handle_error(self):
+        spoofer = make_spoofer()
+        error = SpoofSendError("boom")
+        spoofer.send = Mock(side_effect=error)
+        spoofer.handle_error = Mock()
+
+        spoofer.restore()
+
+        spoofer.handle_error.assert_called_once_with(error)
+
+
+class TestHandleError:
+    def test_records_error_and_forwards_to_on_error_callback(self):
+        on_error = Mock()
+        spoofer = make_spoofer(on_error=on_error)
+        error = ArpSpoofError("boom")
+
+        spoofer.handle_error(error)
+
+        assert spoofer._error is error
+        on_error.assert_called_once_with(error)
+
+    def test_does_not_raise_when_on_error_is_none(self):
+        spoofer = make_spoofer(on_error=None)
+
+        spoofer.handle_error(ArpSpoofError("boom"))  # should not raise
+
+        assert isinstance(spoofer._error, ArpSpoofError)
+
+    def test_swallows_exception_raised_by_on_error_callback(self):
+        on_error = Mock(side_effect=RuntimeError("callback is broken"))
+        spoofer = make_spoofer(on_error=on_error)
+
+        spoofer.handle_error(ArpSpoofError("boom"))  # should not raise/propagate
+
+        on_error.assert_called_once()
+
+
+class TestLifecycle:
+    def test_stop_before_start_does_not_raise(self):
+        # macs unresolved -> restore() is a no-op, so this stays a pure lifecycle check
+        spoofer = make_spoofer(target_mac=None, gateway_mac=None)
+
+        spoofer.stop()  # _thread is None; should be a no-op, not AttributeError
+
+        assert spoofer._stop_event.is_set()
+
+    def test_start_spawns_a_daemon_thread_running__run(self, monkeypatch):
+        started = Mock()
+        monkeypatch.setattr(ArpSpoofer, "_run", started)
+        spoofer = make_spoofer()
+
+        spoofer.start()
+        spoofer._thread.join(timeout=1)
+
+        assert spoofer._thread is not None
+        assert spoofer._thread.daemon is True
+        started.assert_called_once_with()  # bound as target=self._run, so no explicit self arg
+
+    def test_stop_sets_stop_event_and_joins_thread(self, monkeypatch):
+        monkeypatch.setattr(ArpSpoofer, "_run", lambda self: None)
+        spoofer = make_spoofer(target_mac=None, gateway_mac=None)
+        spoofer.start()
+
+        spoofer.stop()
+
+        assert spoofer._stop_event.is_set()
+        assert not spoofer._thread.is_alive()
+
+    def test_stop_always_calls_restore(self, monkeypatch):
+        monkeypatch.setattr(ArpSpoofer, "_run", lambda self: None)
+        spoofer = make_spoofer()
+        spoofer.restore = Mock()
+        spoofer.start()
+
+        spoofer.stop()
+
+        spoofer.restore.assert_called_once_with()
+
+
+class TestRun:
+    def test_resolves_missing_macs_then_runs_poison_loop(self, monkeypatch):
+        monkeypatch.setattr("arp_spoof.get_if_hwaddr", Mock(return_value="ee:ee:ee:ee:ee:ee"))
+        spoofer = make_spoofer(target_mac=None, gateway_mac=None)
+        spoofer.resolve_mac = Mock(side_effect=["aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb"])
+        spoofer.poison = Mock(side_effect=spoofer._stop_event.set)  # stop after first round
+
+        spoofer._run()
+
+        assert spoofer._own_mac == "ee:ee:ee:ee:ee:ee"
+        assert spoofer.target_mac == "aa:aa:aa:aa:aa:aa"
+        assert spoofer.gateway_mac == "bb:bb:bb:bb:bb:bb"
+        spoofer.poison.assert_called_once_with()
+
+    def test_skips_resolve_mac_when_macs_already_known(self, monkeypatch):
+        monkeypatch.setattr("arp_spoof.get_if_hwaddr", Mock(return_value="ee:ee:ee:ee:ee:ee"))
+        spoofer = make_spoofer()  # both macs already set
+        spoofer.resolve_mac = Mock()
+        spoofer.poison = Mock(side_effect=spoofer._stop_event.set)
+
+        spoofer._run()
+
+        spoofer.resolve_mac.assert_not_called()
+
+    def test_loops_until_stop_event_is_set(self, monkeypatch):
+        monkeypatch.setattr("arp_spoof.get_if_hwaddr", Mock(return_value="ee:ee:ee:ee:ee:ee"))
+        spoofer = make_spoofer(interval=0)
+        calls = []
+
+        def fake_poison():
+            calls.append(1)
+            if len(calls) == 3:
+                spoofer._stop_event.set()
+
+        spoofer.poison = fake_poison
+
+        spoofer._run()
+
+        assert len(calls) == 3
+
+    def test_mac_resolution_error_reaches_handle_error_unwrapped(self, monkeypatch):
+        monkeypatch.setattr("arp_spoof.get_if_hwaddr", Mock(return_value="ee:ee:ee:ee:ee:ee"))
+        spoofer = make_spoofer(target_mac=None, gateway_mac=None)
+        error = MacResolutionError("no reply from target")
+        spoofer.resolve_mac = Mock(side_effect=error)
+        spoofer.handle_error = Mock()
+
+        spoofer._run()
+
+        spoofer.handle_error.assert_called_once_with(error)  # passed through as-is, not rewrapped
+
+    def test_unexpected_exception_is_wrapped_in_arp_spoof_error(self, monkeypatch):
+        monkeypatch.setattr("arp_spoof.get_if_hwaddr", Mock(side_effect=OSError("no such device")))
+        spoofer = make_spoofer()
+        spoofer.handle_error = Mock()
+
+        spoofer._run()
+
+        spoofer.handle_error.assert_called_once()
+        (wrapped_error,), _ = spoofer.handle_error.call_args
+        assert type(wrapped_error) is ArpSpoofError  # generic wrapper, not a MacResolutionError/SpoofSendError
+        assert "Unexpected error while ARP-spoofing" in str(wrapped_error)

