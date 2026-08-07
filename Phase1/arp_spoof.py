@@ -18,6 +18,12 @@ class SpoofSendError(ArpSpoofError):
     """Raised when sending a forged/corrective ARP packet fails."""
 
 class ArpSpoofer:
+    # srp()'s bounds for a single resolve_mac() call: worst case (no reply at all)
+    # it blocks for RESOLVE_TIMEOUT * (RESOLVE_RETRY + 1) seconds before giving up.
+    RESOLVE_TIMEOUT = 3
+    RESOLVE_RETRY = 2
+    MAX_RESOLVE_SECONDS = 2 * RESOLVE_TIMEOUT * (RESOLVE_RETRY + 1)
+
     def __init__(
         self,
         interface: str,
@@ -68,7 +74,9 @@ class ArpSpoofer:
     def resolve_mac(self, ip: str) -> str:
         request = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(op=1, pdst=ip)
         try:
-            answered, _ = srp(request, timeout=3, retry=2, iface=self.interface, verbose=False)
+            answered, _ = srp(
+                request, timeout=self.RESOLVE_TIMEOUT, retry=self.RESOLVE_RETRY, iface=self.interface, verbose=False
+            )
         except Exception as exc:
             raise MacResolutionError(f"Failed to send ARP request for {ip!r}: {exc}") from exc
         if not answered:
@@ -93,7 +101,14 @@ class ArpSpoofer:
     def stop(self):
         self._stop_event.set()
         if self._thread:
-            self._thread.join(timeout=self.interval + 1.5)
+            self._thread.join(timeout=self.MAX_RESOLVE_SECONDS + self.interval + 1.5)
+            if self._thread.is_alive():
+                logger.error(
+                    "ARP spoofer thread on %r did not stop within the expected window; "
+                    "skipping restore() to avoid racing with it - real MAC mappings were NOT corrected.",
+                    self.interface,
+                )
+                return
         self.restore()
 
     # This should restore the communication between two original targets before shutting down, so no ARP suspicion is raised

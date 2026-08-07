@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from unittest.mock import Mock
 
@@ -46,8 +47,8 @@ class TestResolveMac:
         assert sent[ARP].pdst == "10.0.0.5"
         assert sent[Ether].dst == "ff:ff:ff:ff:ff:ff"  # broadcast
         assert kwargs["iface"] == "eth0"
-        assert kwargs["timeout"] == 3
-        assert kwargs["retry"] == 2
+        assert kwargs["timeout"] == ArpSpoofer.RESOLVE_TIMEOUT
+        assert kwargs["retry"] == ArpSpoofer.RESOLVE_RETRY
         assert kwargs["verbose"] is False
 
     def test_raises_mac_resolution_error_when_no_reply(self, monkeypatch):
@@ -115,6 +116,31 @@ class TestSend:
             spoofer.send(dst_mac="aa:aa:aa:aa:aa:aa", spoofed_ip="10.0.0.1", real_dst_ip="10.0.0.5")
 
         assert exc_info.value.__cause__ is original
+
+    def test_packet_survives_real_wire_serialization(self, monkeypatch):
+        # Every other test in this class inspects the pre-serialization packet
+        # object. This one forces bytes(pkt) - same as scapy does right before
+        # putting it on the wire - and re-parses the result, so a field that
+        # can't actually pack (bad MAC/IP string, wrong type, etc.) fails here
+        # instead of surfacing for the first time against a real interface.
+        captured = {}
+        monkeypatch.setattr("arp_spoof.sendp", lambda pkt, **kw: captured.__setitem__("raw", bytes(pkt)))
+        spoofer = make_spoofer()
+        spoofer._own_mac = "ee:ee:ee:ee:ee:ee"
+
+        spoofer.send(dst_mac="aa:aa:aa:aa:aa:aa", spoofed_ip="10.0.0.1", real_dst_ip="10.0.0.5")
+
+        parsed = Ether(captured["raw"])
+        assert parsed[Ether].dst == "aa:aa:aa:aa:aa:aa"
+        assert parsed[ARP].op == 2
+        assert parsed[ARP].psrc == "10.0.0.1"
+        assert parsed[ARP].pdst == "10.0.0.5"
+        assert parsed[ARP].hwdst == "aa:aa:aa:aa:aa:aa"
+        assert parsed[ARP].hwsrc == "ee:ee:ee:ee:ee:ee"
+        assert parsed[ARP].hwtype == 1  # Ethernet
+        assert parsed[ARP].ptype == 0x0800  # IPv4
+        assert parsed[ARP].hwlen == 6
+        assert parsed[ARP].plen == 4
 
 
 class TestPoison:
@@ -255,6 +281,22 @@ class TestLifecycle:
 
         spoofer.restore.assert_called_once_with()
 
+    def test_stop_skips_restore_and_logs_if_thread_never_finishes(self, caplog):
+        # Simulates join() timing out because _run() is still stuck resolving/
+        # poisoning - stop() must not call restore() concurrently with it.
+        spoofer = make_spoofer()
+        spoofer.restore = Mock()
+        fake_thread = Mock()
+        fake_thread.is_alive.return_value = True
+        spoofer._thread = fake_thread
+
+        with caplog.at_level(logging.ERROR):
+            spoofer.stop()
+
+        fake_thread.join.assert_called_once()
+        spoofer.restore.assert_not_called()
+        assert "did not stop" in caplog.text
+
 
 class TestRun:
     def test_resolves_missing_macs_then_runs_poison_loop(self, monkeypatch):
@@ -318,3 +360,61 @@ class TestRun:
         (wrapped_error,), _ = spoofer.handle_error.call_args
         assert type(wrapped_error) is ArpSpoofError  # generic wrapper, not a MacResolutionError/SpoofSendError
         assert "Unexpected error while ARP-spoofing" in str(wrapped_error)
+
+    def test_full_iteration_sends_two_well_formed_replies_end_to_end(self, monkeypatch):
+        # Only the scapy boundary (get_if_hwaddr/sendp) is mocked here - poison()
+        # and send() run for real, so this exercises the actual _run -> poison ->
+        # send -> sendp chain in one shot rather than trusting each link in isolation.
+        monkeypatch.setattr("arp_spoof.get_if_hwaddr", Mock(return_value="ee:ee:ee:ee:ee:ee"))
+        fake_sendp = Mock()
+        monkeypatch.setattr("arp_spoof.sendp", fake_sendp)
+        spoofer = make_spoofer()  # macs already known - skips resolve_mac/srp
+
+        sent = []
+
+        def record_and_stop_after_second(pkt, **kwargs):
+            sent.append(pkt)
+            if len(sent) == 2:
+                spoofer._stop_event.set()
+
+        fake_sendp.side_effect = record_and_stop_after_second
+
+        spoofer._run()
+
+        assert len(sent) == 2
+        target_pkt, gateway_pkt = sent
+        assert target_pkt[Ether].dst == "aa:aa:aa:aa:aa:aa"
+        assert target_pkt[ARP].psrc == "10.0.0.1"
+        assert target_pkt[ARP].hwsrc == "ee:ee:ee:ee:ee:ee"
+        assert gateway_pkt[Ether].dst == "bb:bb:bb:bb:bb:bb"
+        assert gateway_pkt[ARP].psrc == "10.0.0.5"
+        assert gateway_pkt[ARP].hwsrc == "ee:ee:ee:ee:ee:ee"
+
+    def test_full_run_resolves_macs_and_poisons_end_to_end(self, monkeypatch):
+        # Same idea but starting from unknown MACs, so resolve_mac()/srp run for
+        # real too - covers the entire chain from a cold start.
+        monkeypatch.setattr("arp_spoof.get_if_hwaddr", Mock(return_value="ee:ee:ee:ee:ee:ee"))
+        target_reply = Ether(src="aa:aa:aa:aa:aa:aa") / ARP(psrc="10.0.0.5", hwsrc="aa:aa:aa:aa:aa:aa")
+        gateway_reply = Ether(src="bb:bb:bb:bb:bb:bb") / ARP(psrc="10.0.0.1", hwsrc="bb:bb:bb:bb:bb:bb")
+        monkeypatch.setattr(
+            "arp_spoof.srp",
+            Mock(side_effect=[([(Mock(), target_reply)], []), ([(Mock(), gateway_reply)], [])]),
+        )
+        fake_sendp = Mock()
+        monkeypatch.setattr("arp_spoof.sendp", fake_sendp)
+        spoofer = make_spoofer(target_mac=None, gateway_mac=None)
+
+        sent = []
+
+        def record_and_stop_after_second(pkt, **kwargs):
+            sent.append(pkt)
+            if len(sent) == 2:
+                spoofer._stop_event.set()
+
+        fake_sendp.side_effect = record_and_stop_after_second
+
+        spoofer._run()
+
+        assert spoofer.target_mac == "aa:aa:aa:aa:aa:aa"
+        assert spoofer.gateway_mac == "bb:bb:bb:bb:bb:bb"
+        assert len(sent) == 2
