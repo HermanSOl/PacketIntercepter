@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 from scapy.all import ARP, ICMP, IP, TCP, UDP, Ether, Raw
 
-from detection_engine import FtpAlert, FtpRule, HttpAlert, HttpRule
+from detection_engine import DnsAlert, DnsRule, FtpAlert, FtpRule, HttpAlert, HttpRule, TelnetAlert, TelnetRule
 from pkt_capture_parse import Packet, Sniffer
 
 
@@ -204,4 +204,22 @@ class TestScapyPacketTripsDetectionRules:
         alert = FtpRule().check(summary)
 
         assert isinstance(alert, FtpAlert)
+        assert alert.pkt is summary
+
+    def test_telnet_session_trips_telnet_rule(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=54321, dport=23) / Raw(b"login: "))
+        summary = Packet.sum_from_scapy(pkt)
+
+        alert = TelnetRule().check(summary)
+
+        assert isinstance(alert, TelnetAlert)
+        assert alert.pkt is summary
+
+    def test_dns_query_trips_dns_rule(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / UDP(sport=54321, dport=53) / Raw(b"dns-query"))
+        summary = Packet.sum_from_scapy(pkt)
+
+        alert = DnsRule().check(summary)
+
+        assert isinstance(alert, DnsAlert)
         assert alert.pkt is summary

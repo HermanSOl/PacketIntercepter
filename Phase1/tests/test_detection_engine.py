@@ -1,7 +1,17 @@
 """Tests for detection_engine.py — HttpRule, FtpRule, and AlertHandler."""
 from __future__ import annotations
 
-from detection_engine import AlertHandler, FtpAlert, FtpRule, HttpAlert, HttpRule
+from detection_engine import (
+    AlertHandler,
+    DnsAlert,
+    DnsRule,
+    FtpAlert,
+    FtpRule,
+    HttpAlert,
+    HttpRule,
+    TelnetAlert,
+    TelnetRule,
+)
 from pkt_capture_parse import Packet
 
 
@@ -65,6 +75,49 @@ class TestFtpRule:
     def test_ignores_udp_traffic_on_control_port(self):
         pkt = make_packet(protocol="UDP", dport=21, payload=b"USER admin\r\n")
         assert FtpRule().check(pkt) is None
+
+
+class TestTelnetRule:
+    def test_flags_tcp_traffic_to_port_23(self):
+        pkt = make_packet(dport=23)
+        alert = TelnetRule().check(pkt)
+
+        assert isinstance(alert, TelnetAlert)
+        assert alert.pkt is pkt
+
+    def test_flags_tcp_traffic_from_port_23(self):
+        pkt = make_packet(sport=23, dport=54321)
+        assert isinstance(TelnetRule().check(pkt), TelnetAlert)
+
+    def test_ignores_tcp_traffic_on_other_ports(self):
+        pkt = make_packet(sport=1111, dport=443)
+        assert TelnetRule().check(pkt) is None
+
+    def test_ignores_non_tcp_traffic_on_port_23(self):
+        pkt = make_packet(protocol="UDP", dport=23)
+        assert TelnetRule().check(pkt) is None
+
+
+class TestDnsRule:
+    def test_flags_udp_traffic_to_port_53(self):
+        pkt = make_packet(protocol="UDP", dport=53)
+        alert = DnsRule().check(pkt)
+
+        assert isinstance(alert, DnsAlert)
+        assert alert.pkt is pkt
+
+    def test_flags_udp_traffic_from_port_53(self):
+        pkt = make_packet(protocol="UDP", sport=53, dport=54321)
+        assert isinstance(DnsRule().check(pkt), DnsAlert)
+
+    def test_ignores_udp_traffic_on_other_ports(self):
+        pkt = make_packet(protocol="UDP", sport=1111, dport=443)
+        assert DnsRule().check(pkt) is None
+
+    def test_ignores_tcp_traffic_on_port_53(self):
+        # DNS-over-TCP exists but isn't covered by this rule
+        pkt = make_packet(protocol="TCP", dport=53)
+        assert DnsRule().check(pkt) is None
 
 
 class TestAlertHandler:
