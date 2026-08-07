@@ -51,41 +51,47 @@ class ArpSpoofer:
         try:
             self._own_mac = get_if_hwaddr(self.interface)
             if self.target_mac is None:
-                self.target_mac = self._resolve_mac(self.target_ip)
+                self.target_mac = self.resolve_mac(self.target_ip)
             if self.gateway_mac is None:
-                self.gateway_mac = self._resolve_mac(self.gateway_ip)
+                self.gateway_mac = self.resolve_mac(self.gateway_ip)
 
             while not self._stop_event.is_set():
-                self._poison()
+                self.poison()
                 self._stop_event.wait(self.interval)
         except ArpSpoofError as exc:
-            self._handle_error(exc)
+            self.handle_error(exc)
         except Exception as exc:
-            self._handle_error(ArpSpoofError(f"Unexpected error while ARP-spoofing on {self.interface!r}: {exc}"))
+            self.handle_error(ArpSpoofError(f"Unexpected error while ARP-spoofing on {self.interface!r}: {exc}"))
 
     # Sends a real ARP request and reads the real MAC off the reply, for whichever
     # side (target/gateway) wasn't already configured with a known MAC.
-    def _resolve_mac(self, ip: str) -> str:
-        return "s"
+    def resolve_mac(self, ip: str) -> str:
+        request = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(op=1, pdst=ip)
+        try:
+            answered, _ = srp(request, timeout=3, retry=2, iface=self.interface, verbose=False)
+        except Exception as exc:
+            raise MacResolutionError(f"Failed to send ARP request for {ip!r}: {exc}") from exc
+        if not answered:
+            raise MacResolutionError(f"No ARP reply from {ip!r} - is it up and reachable on {self.interface!r}?")
+        return answered[0][1][Ether].src
 
     # One round of forged replies: tells each side the other lives at our MAC.
-    def _poison(self):
+    def poison(self):
         return
 
-    
-    def _send(self, dst_mac: str, spoofed_ip: str, real_dst_ip: str, src_mac: str | None = None):
+    def send(self, dst_mac: str, spoofed_ip: str, real_dst_ip: str, src_mac: str | None = None):
         return "stub"
 
     def stop(self):
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=self.interval + 1.5)
-        self._restore()
+        self.restore()
 
     # This should restore the communication between two original targets before shutting down, so no ARP suspicion is raised
-    def _restore(self):
+    def restore(self):
         return "bruh"
 
     # Records/reports an error raised inside the spoofer thread instead of letting it vanish
-    def _handle_error(self, error: Exception):
+    def handle_error(self, error: Exception):
        return "yeah"
