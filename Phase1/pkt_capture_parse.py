@@ -4,8 +4,11 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, TYPE_CHECKING
 from scapy.all import sniff, Ether, IP, TCP, UDP, Raw
-## THIS IS TEMPORARY. REMOVE ONCE WE HAVE DETECTIONRULE AND SUS
-from detection_engine import DetectionRule,SusAlert,AlertHandler
+
+if TYPE_CHECKING:
+    # Only needed for type hints, not at runtime - avoids a circular import
+    # with detection_engine.py, which imports Packet from this module too.
+    from detection_engine import DetectionRule, SusAlert
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +31,7 @@ class Sniffer:
         self,
         interface: str,
         rules: list[DetectionRule],
-        on_sus: lambda _: AlertHandler.process_alert([SusAlert], None),
+        on_sus: Callable[[SusAlert], None],
         on_error: Callable[[Exception], None] | None = None,
     ):
        self.interface = interface
@@ -87,7 +90,9 @@ class Sniffer:
                     self.on_sus(alert)
                 except Exception:
                     logger.exception("on_sus handler raised while reporting an alert")
-        return packet_summary
+        # Returning packet_summary here would make scapy's sniff(prn=...) auto-print
+        # its repr() (raw payload bytes and all) for every packet - not what we want.
+        return None
 
     def stop(self):
         self.end = True
