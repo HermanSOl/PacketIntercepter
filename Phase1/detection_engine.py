@@ -1,4 +1,11 @@
+from __future__ import annotations
 from abc import ABC, abstractmethod
+from collections import deque
+from typing import TYPE_CHECKING
+import threading
+
+if TYPE_CHECKING:
+    from pkt_capture_parse import Packet
 
 class DetectionRule:
     @abstractmethod
@@ -6,7 +13,7 @@ class DetectionRule:
         self.condition = condition
 
     @abstractmethod
-    def process_condition(self):
+    def check(self,pkt: Packet):
         True if self.condition else False
 
 
@@ -15,6 +22,18 @@ class SusAlert:
         pass
 
 
-def process_alerts(alerts: list[SusAlert]):
-    ### some implementation in the future
-    return
+
+class AlertHandler():
+
+    def __init__(self, maxlen: int = 500):
+        self.lock = threading.Lock()
+        self.alerts: deque[SusAlert] = deque(maxlen=maxlen)
+
+
+    def process_alert(self, alert: SusAlert):
+        with self.lock:
+            self.alerts.append(alert)
+
+    def get_alerts(self) -> list[SusAlert]:
+        with self.lock:
+            return list(self.alerts)

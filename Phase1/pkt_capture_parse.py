@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Callable, TYPE_CHECKING
 from scapy.all import sniff, Ether, IP, TCP, UDP, Raw
 ## THIS IS TEMPORARY. REMOVE ONCE WE HAVE DETECTIONRULE AND SUS
-from detection_engine import DetectionRule,SusAlert,process_alerts
+from detection_engine import DetectionRule,SusAlert,AlertHandler
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ class Sniffer:
         self,
         interface: str,
         rules: list[DetectionRule],
-        on_sus: lambda _: process_alerts([SusAlert], None),
+        on_sus: lambda _: AlertHandler.process_alert([SusAlert], None),
         on_error: Callable[[Exception], None] | None = None,
     ):
        self.interface = interface
