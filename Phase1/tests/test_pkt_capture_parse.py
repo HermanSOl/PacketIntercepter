@@ -22,6 +22,8 @@ from detection_engine import (
     MailRule,
     TelnetAlert,
     TelnetRule,
+    WeakTlsAlert,
+    WeakTlsRule,
 )
 from pkt_capture_parse import Packet, Sniffer
 
@@ -242,6 +244,17 @@ class TestScapyPacketTripsDetectionRules:
         alert = MailRule().check(summary)
 
         assert isinstance(alert, MailAlert)
+        assert alert.pkt is summary
+
+    def test_tls_1_0_client_hello_trips_weak_tls_rule(self):
+        # content type 0x16 (Handshake), record version, record length,
+        tls_payload = b"\x16\x03\x01\x00\x2f\x01\x00\x00\x2b\x03\x01" + b"\x00" * 32
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=54321, dport=443) / Raw(tls_payload))
+        summary = Packet.sum_from_scapy(pkt)
+
+        alert = WeakTlsRule().check(summary)
+
+        assert isinstance(alert, WeakTlsAlert)
         assert alert.pkt is summary
 
     def test_pop3_traffic_trips_mail_rule(self):

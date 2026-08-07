@@ -46,6 +46,10 @@ class MailAlert(SusAlert):
     pass
 
 
+class WeakTlsAlert(SusAlert):
+    pass
+
+
 # --- Rules ------------------------------------------------------------------
 
 # Plaintext HTTP traffic (port 80, no TLS)
@@ -90,6 +94,7 @@ class DnsRule(DetectionRule):
             return DnsAlert(pkt, "Unencrypted DNS query - reveals browsing activity and is trivially spoofable")
         return None
 
+
 class MailRule(DetectionRule):
     PORTS = {25: "SMTP", 110: "POP3", 143: "IMAP"}
 
@@ -101,6 +106,39 @@ class MailRule(DetectionRule):
             if name:
                 return MailAlert(pkt, f"Unencrypted {name} traffic - mail content/credentials exposed")
         return None
+
+
+## This rule checks byte for byte to ensure that all of them are in place.
+# For now this is still weak, as it only reads fixed bytes positions and doesn't account for extensions
+class WeakTlsRule(DetectionRule):
+    HANDSHAKE_CONTENT_TYPE = 0x16
+    CLIENT_HELLO = 0x01
+    SERVER_HELLO = 0x02
+    HELLO_TYPES = {CLIENT_HELLO: "ClientHello", SERVER_HELLO: "ServerHello"}
+    WEAK_VERSIONS = {
+        b"\x03\x01": "TLS 1.0",
+        b"\x03\x02": "TLS 1.1",
+    }
+    MIN_LEN = 11  # record header (5) + handshake header (4) + version (2)
+
+    def check(self, pkt: Packet) -> SusAlert | None:
+        if pkt.protocol != "TCP" or len(pkt.payload) < self.MIN_LEN:
+            return None
+
+        payload = pkt.payload
+        if payload[0] != self.HANDSHAKE_CONTENT_TYPE:
+            return None
+
+        hello_name = self.HELLO_TYPES.get(payload[5])
+        if hello_name is None:
+            return None
+
+        version_name = self.WEAK_VERSIONS.get(payload[9:11])
+        if version_name is None:
+            return None
+
+        return WeakTlsAlert(pkt, f"{hello_name} proposes {version_name} - deprecated, vulnerable TLS version")
+
 
 class AlertHandler:
     def __init__(self, maxlen: int = 500):

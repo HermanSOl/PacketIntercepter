@@ -13,6 +13,8 @@ from detection_engine import (
     MailRule,
     TelnetAlert,
     TelnetRule,
+    WeakTlsAlert,
+    WeakTlsRule,
 )
 from pkt_capture_parse import Packet
 
@@ -28,6 +30,15 @@ def make_packet(protocol="TCP", sport=1111, dport=80, payload=b""):
         dport=dport,
         payload=payload,
     )
+
+
+def make_tls_record(handshake_type=0x01, version=b"\x03\x01", content_type=0x16):
+    """Builds the fixed-position bytes WeakTlsRule reads: record header,
+    handshake header, then the client/server version field."""
+    record_version = b"\x03\x01"
+    record_length = b"\x00\x2f"
+    handshake_length = b"\x00\x00\x2b"
+    return bytes([content_type]) + record_version + record_length + bytes([handshake_type]) + handshake_length + version
 
 
 class TestHttpRule:
@@ -156,6 +167,49 @@ class TestMailRule:
     def test_ignores_udp_traffic_on_mail_ports(self):
         pkt = make_packet(protocol="UDP", dport=25)
         assert MailRule().check(pkt) is None
+
+
+class TestWeakTlsRule:
+    def test_flags_client_hello_proposing_tls_1_0(self):
+        pkt = make_packet(payload=make_tls_record(handshake_type=0x01, version=b"\x03\x01"))
+        alert = WeakTlsRule().check(pkt)
+
+        assert isinstance(alert, WeakTlsAlert)
+        assert alert.pkt is pkt
+        assert "ClientHello" in alert.reason
+        assert "TLS 1.0" in alert.reason
+
+    def test_flags_server_hello_proposing_tls_1_1(self):
+        pkt = make_packet(payload=make_tls_record(handshake_type=0x02, version=b"\x03\x02"))
+        alert = WeakTlsRule().check(pkt)
+
+        assert isinstance(alert, WeakTlsAlert)
+        assert "ServerHello" in alert.reason
+        assert "TLS 1.1" in alert.reason
+
+    def test_ignores_modern_tls_version(self):
+        # TLS 1.2/1.3 clients set this field to 0x0303 - not weak, should pass through
+        pkt = make_packet(payload=make_tls_record(handshake_type=0x01, version=b"\x03\x03"))
+        assert WeakTlsRule().check(pkt) is None
+
+    def test_ignores_non_hello_handshake_message(self):
+        # e.g. Certificate (0x0b) - a handshake message, but not a Hello, so it
+        # has no client/server version field at this offset
+        pkt = make_packet(payload=make_tls_record(handshake_type=0x0b, version=b"\x03\x01"))
+        assert WeakTlsRule().check(pkt) is None
+
+    def test_ignores_non_handshake_content_type(self):
+        # e.g. ApplicationData (0x17) - encrypted traffic after the handshake completes
+        pkt = make_packet(payload=make_tls_record(handshake_type=0x01, version=b"\x03\x01", content_type=0x17))
+        assert WeakTlsRule().check(pkt) is None
+
+    def test_ignores_udp_traffic(self):
+        pkt = make_packet(protocol="UDP", payload=make_tls_record())
+        assert WeakTlsRule().check(pkt) is None
+
+    def test_ignores_payload_too_short_to_contain_a_version_field(self):
+        pkt = make_packet(payload=b"\x16\x03\x01")
+        assert WeakTlsRule().check(pkt) is None
 
 
 class TestAlertHandler:
