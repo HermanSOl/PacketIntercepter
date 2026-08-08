@@ -1,12 +1,3 @@
-"""Entry point for Phase 1: wires ARP spoofing (arp_spoof.py), IP forwarding
-(ip_forward.py), the capture layer (pkt_capture_parse.py) and the detection
-engine (detection_engine.py) together, so running this script poisons
-target_ip<->gateway_ip, keeps their traffic actually flowing through this box,
-and sniffs+flags it as it passes through.
-
-Needs enough privilege for scapy to send/sniff raw packets and to flip the
-ip_forward sysctl (e.g. via sudo).
-"""
 from __future__ import annotations
 
 import argparse
@@ -78,8 +69,6 @@ def main() -> None:
             interval=args.interval,
             on_error=on_spoof_error,
         )
-        # Only needed once we're actually redirecting traffic through this box -
-        # a pure --no-spoof sniff doesn't put us in the path, so nothing to enable.
         forwarder = IpForwarder()
         try:
             forwarder.enable()
