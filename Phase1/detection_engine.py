@@ -17,6 +17,12 @@ class DetectionRule(ABC):
     def check(self, pkt: Packet) -> SusAlert | None:
         ...
 
+    # (protocol, port) pairs for main.build_bpf_filter(). None (the default)
+    # means "unrestricted" - a rule that doesn't override this stays fully
+    # captured instead of getting silently filtered out.
+    def bpf_ports(self) -> tuple[tuple[str, int], ...] | None:
+        return None
+
 
 class SusAlert:
     def __init__(self, pkt: Packet, reason: str):
@@ -61,6 +67,9 @@ class HttpRule(DetectionRule):
             return HttpAlert(pkt, "Plaintext HTTP on port 80 - content and any credentials are readable on the wire")
         return None
 
+    def bpf_ports(self):
+        return (("tcp", self.PORT),)
+
 
 # FTP login sequence (USER/PASS sent in cleartext on the control channel)
 class FtpRule(DetectionRule):
@@ -74,6 +83,9 @@ class FtpRule(DetectionRule):
             return FtpAlert(pkt, "FTP USER/PASS sent in cleartext - credentials exposed")
         return None
 
+    def bpf_ports(self):
+        return (("tcp", self.CONTROL_PORT),)
+
 
 # Telnet session (entire session, including login, is cleartext)
 class TelnetRule(DetectionRule):
@@ -84,6 +96,9 @@ class TelnetRule(DetectionRule):
             return TelnetAlert(pkt, "Telnet session - entire session including login is cleartext")
         return None
 
+    def bpf_ports(self):
+        return (("tcp", self.PORT),)
+
 
 # Unencrypted DNS query (plain port 53)
 class DnsRule(DetectionRule):
@@ -93,6 +108,9 @@ class DnsRule(DetectionRule):
         if pkt.protocol == "UDP" and self.PORT in (pkt.sport, pkt.dport):
             return DnsAlert(pkt, "Unencrypted DNS query - reveals browsing activity and is trivially spoofable")
         return None
+
+    def bpf_ports(self):
+        return (("udp", self.PORT),)
 
 
 class MailRule(DetectionRule):
@@ -107,6 +125,9 @@ class MailRule(DetectionRule):
                 return MailAlert(pkt, f"Unencrypted {name} traffic - mail content/credentials exposed")
         return None
 
+    def bpf_ports(self):
+        return tuple(("tcp", port) for port in self.PORTS)
+
 
 ## This rule checks byte for byte to ensure that all of them are in place.
 # For now this is still weak, as it only reads fixed bytes positions and doesn't account for extensions
@@ -120,6 +141,11 @@ class WeakTlsRule(DetectionRule):
         b"\x03\x02": "TLS 1.1",
     }
     MIN_LEN = 11  # record header (5) + handshake header (4) + version (2)
+
+    # For bpf_ports() only - check() stays port-agnostic. Without this list,
+    # main.build_bpf_filter() can't narrow the capture at all. Trade-off: TLS
+    # on a port not listed here won't be captured.
+    BPF_PORTS = (443, 465, 587, 993, 995, 8443)
 
     def check(self, pkt: Packet) -> SusAlert | None:
         if pkt.protocol != "TCP" or len(pkt.payload) < self.MIN_LEN:
@@ -138,6 +164,9 @@ class WeakTlsRule(DetectionRule):
             return None
 
         return WeakTlsAlert(pkt, f"{hello_name} proposes {version_name} - deprecated, vulnerable TLS version")
+
+    def bpf_ports(self):
+        return tuple(("tcp", port) for port in self.BPF_PORTS)
 
 
 class AlertHandler:
