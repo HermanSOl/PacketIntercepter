@@ -5,13 +5,32 @@ import logging
 import time
 
 from arp_spoof import ArpSpoofer
-from detection_engine import AlertHandler, DnsRule, FtpRule, HttpRule, MailRule, TelnetRule, WeakTlsRule
+from detection_engine import AlertHandler, DetectionRule, DnsRule, FtpRule, HttpRule, MailRule, TelnetRule, WeakTlsRule
 from ip_forward import ForwardPolicy, ForwardPolicyError, IpForwarder, IpForwardError
 from pkt_capture_parse import Sniffer
 
 logger = logging.getLogger(__name__)
 
 RULES = [HttpRule(), FtpRule(), TelnetRule(), MailRule(), DnsRule(), WeakTlsRule()]
+
+
+# Scopes capture to target_ip's traffic on only the ports RULES can ever match
+# on, so bulk traffic on uninteresting ports/protocols (e.g. QUIC on udp/443)
+# never reaches the sniffer thread's Python callback. Falls back to no port
+# narrowing if any rule reports unrestricted ports (see DetectionRule.bpf_ports).
+def build_bpf_filter(target_ip: str, rules: list[DetectionRule]) -> str:
+    protos_and_ports: set[tuple[str, int]] = set()
+    for rule in rules:
+        ports = rule.bpf_ports()
+        if ports is None:
+            return f"ip and host {target_ip}"
+        protos_and_ports.update(ports)
+
+    if not protos_and_ports:
+        return f"ip and host {target_ip}"
+
+    port_terms = " or ".join(f"{proto} port {port}" for proto, port in sorted(protos_and_ports))
+    return f"ip and host {target_ip} and ({port_terms})"
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,9 +79,7 @@ def main() -> None:
         rules=RULES,
         on_sus=handler.process_alert,
         on_error=on_sniff_error,
-        # Scope capture to the target's traffic in-kernel - keeps unrelated LAN
-        # devices out of both the alert feed and this thread's GIL usage.
-        bpf_filter=f"ip and host {args.target_ip}",
+        bpf_filter=build_bpf_filter(args.target_ip, RULES),
     )
 
     spoofer = None

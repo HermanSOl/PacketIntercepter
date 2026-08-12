@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from detection_engine import (
     AlertHandler,
+    DetectionRule,
     DnsAlert,
     DnsRule,
     FtpAlert,
@@ -63,6 +64,9 @@ class TestHttpRule:
         pkt = make_packet(protocol="UDP", dport=80)
         assert HttpRule().check(pkt) is None
 
+    def test_bpf_ports_is_tcp_80(self):
+        assert HttpRule().bpf_ports() == (("tcp", 80),)
+
 
 class TestFtpRule:
     def test_flags_user_command_on_control_port(self):
@@ -89,6 +93,9 @@ class TestFtpRule:
         pkt = make_packet(protocol="UDP", dport=21, payload=b"USER admin\r\n")
         assert FtpRule().check(pkt) is None
 
+    def test_bpf_ports_is_tcp_21(self):
+        assert FtpRule().bpf_ports() == (("tcp", 21),)
+
 
 class TestTelnetRule:
     def test_flags_tcp_traffic_to_port_23(self):
@@ -109,6 +116,9 @@ class TestTelnetRule:
     def test_ignores_non_tcp_traffic_on_port_23(self):
         pkt = make_packet(protocol="UDP", dport=23)
         assert TelnetRule().check(pkt) is None
+
+    def test_bpf_ports_is_tcp_23(self):
+        assert TelnetRule().bpf_ports() == (("tcp", 23),)
 
 
 class TestDnsRule:
@@ -131,6 +141,9 @@ class TestDnsRule:
         # DNS-over-TCP exists but isn't covered by this rule
         pkt = make_packet(protocol="TCP", dport=53)
         assert DnsRule().check(pkt) is None
+
+    def test_bpf_ports_is_udp_53(self):
+        assert DnsRule().bpf_ports() == (("udp", 53),)
 
 
 class TestMailRule:
@@ -167,6 +180,9 @@ class TestMailRule:
     def test_ignores_udp_traffic_on_mail_ports(self):
         pkt = make_packet(protocol="UDP", dport=25)
         assert MailRule().check(pkt) is None
+
+    def test_bpf_ports_covers_smtp_pop3_and_imap(self):
+        assert set(MailRule().bpf_ports()) == {("tcp", 25), ("tcp", 110), ("tcp", 143)}
 
 
 class TestWeakTlsRule:
@@ -210,6 +226,25 @@ class TestWeakTlsRule:
     def test_ignores_payload_too_short_to_contain_a_version_field(self):
         pkt = make_packet(payload=b"\x16\x03\x01")
         assert WeakTlsRule().check(pkt) is None
+
+    def test_bpf_ports_covers_standard_tls_ports_only(self):
+        # check() is port-agnostic - a weak handshake on e.g. port 8080 would
+        # still be flagged if it reached check(), it just won't be captured
+        # by the narrowed BPF filter main.build_bpf_filter() derives from this.
+        assert set(WeakTlsRule().bpf_ports()) == {
+            ("tcp", 443), ("tcp", 465), ("tcp", 587), ("tcp", 993), ("tcp", 995), ("tcp", 8443),
+        }
+
+
+class TestDetectionRuleBpfPortsDefault:
+    def test_a_rule_that_does_not_override_bpf_ports_is_unrestricted(self):
+        # A new rule that forgets to override bpf_ports() must stay fully
+        # captured (None), not silently filtered out of the capture entirely.
+        class SomeNewRule(DetectionRule):
+            def check(self, pkt):
+                return None
+
+        assert SomeNewRule().bpf_ports() is None
 
 
 class TestAlertHandler:
