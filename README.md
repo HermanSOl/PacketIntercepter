@@ -25,3 +25,7 @@ Phased build plan:
 - Phase 3: multi-device spoofing support
 - Phase 4: localhost web dashboard (Flask/FastAPI + websocket) replacing/extending the terminal UI
   l
+
+
+<h2>Big challenge faced:</h2>
+The big challenge is SPEED (I know kind of obvious). I mean, at first I set up IP forwarding wrong completely and the target's device couldn't even reach the internet, so that was very apparent. When I run my app for now it is very apparent for the target to notice a drop in connection. After I fixed it, as well as enabled the FORWARD policy so that the FIREWALL level wouldn't block it it became a bit better but was still very slow. However, I think I know what is responsible for the big speed drop. By testing the sniffer and spoofer independently I realized that the problem is the SNIFFER THREAD. It has a delay of 5.27 ms on average no matter how many rules it checks. It is the BPF filter, meaning my device was capturing and processing to many packets on the sniffer. By making a tighter BPF filter it should speed up the process, so wish me luck. Wanted to write this down since it was very fun.
