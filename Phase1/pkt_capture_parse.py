@@ -26,6 +26,28 @@ class PacketParseError(SnifferError):
     """Raised when a captured packet can't be turned into a Packet summary."""
 
 
+class FlowTracker:
+    """Caps how many packets per flow direction get fully dissected/checked -
+    what a flow's port/handshake say is decided within its first few packets.
+    """
+
+    def __init__(self, budget: int = 4, max_flows: int = 50_000):
+        self.budget = budget
+        self.max_flows = max_flows
+        self._remaining: dict[tuple, int] = {}
+
+    def should_inspect(self, flow_key: tuple) -> bool:
+        remaining = self._remaining.get(flow_key, self.budget)
+        if remaining <= 0:
+            return False
+        if flow_key not in self._remaining and len(self._remaining) >= self.max_flows:
+            # Bounds unbounded growth over a long session; just re-inspects
+            # already-dismissed flows
+            self._remaining.clear()
+        self._remaining[flow_key] = remaining - 1
+        return True
+
+
 class Sniffer:
     def __init__(
         self,
@@ -34,12 +56,14 @@ class Sniffer:
         on_sus: Callable[[SusAlert], None],
         on_error: Callable[[Exception], None] | None = None,
         bpf_filter: str | None = None,
+        flow_tracker: FlowTracker | None = None,
     ):
        self.interface = interface
        self.rules = rules
        self.on_sus = on_sus # function called on capture
        self.on_error = on_error
        self.bpf_filter = bpf_filter
+       self.flow_tracker = flow_tracker if flow_tracker is not None else FlowTracker()
        self._thread: threading.Thread | None = None # needs a seperate thread apart from spoofing,etc.
        self._error: Exception | None = None
        self.end = False
@@ -78,6 +102,10 @@ class Sniffer:
 
     # Gets a structured summary of the packet, runs it through detection function, parses the summary and any sus alerts forward
     def digest(self, raw_packet) -> "Packet | None":
+        flow_key = Packet.flow_key_from_scapy(raw_packet)
+        if flow_key is not None and not self.flow_tracker.should_inspect(flow_key):
+            return None  # flow's budget is spent - not worth re-dissecting
+
         try:
             packet_summary = Packet.sum_from_scapy(raw_packet)
         except PacketParseError:
@@ -119,6 +147,19 @@ class Packet:
     sport: int | None
     dport: int | None
     payload: bytes
+
+    @staticmethod
+    def flow_key_from_scapy(raw_packet) -> tuple | None:
+        if not raw_packet.haslayer(IP):
+            return None
+        ip_layer = raw_packet[IP]
+        if raw_packet.haslayer(TCP):
+            tcp = raw_packet[TCP]
+            return ("TCP", ip_layer.src, tcp.sport, ip_layer.dst, tcp.dport)
+        if raw_packet.haslayer(UDP):
+            udp = raw_packet[UDP]
+            return ("UDP", ip_layer.src, udp.sport, ip_layer.dst, udp.dport)
+        return (str(ip_layer.proto), ip_layer.src, None, ip_layer.dst, None)
 
     # Builds a Packet based on the packet captured by the sniffer. This packet then is checked for alerts
     @classmethod

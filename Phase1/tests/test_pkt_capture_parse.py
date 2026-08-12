@@ -25,7 +25,7 @@ from detection_engine import (
     WeakTlsAlert,
     WeakTlsRule,
 )
-from pkt_capture_parse import Packet, Sniffer
+from pkt_capture_parse import FlowTracker, Packet, Sniffer
 
 
 def build(layer):
@@ -82,6 +82,70 @@ class TestPacketSumFromScapy: ## build a packet using scapy, run it through the 
         summary = Packet.sum_from_scapy(pkt)
 
         assert summary.payload == b""
+
+
+class TestPacketFlowKeyFromScapy:
+    def test_returns_none_when_no_ip_layer(self):
+        pkt = build(Ether() / ARP())
+        assert Packet.flow_key_from_scapy(pkt) is None
+
+    def test_tcp_key_includes_protocol_ips_and_ports(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=1111, dport=80))
+        assert Packet.flow_key_from_scapy(pkt) == ("TCP", "10.0.0.1", 1111, "10.0.0.2", 80)
+
+    def test_udp_key_includes_protocol_ips_and_ports(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / UDP(sport=5353, dport=53))
+        assert Packet.flow_key_from_scapy(pkt) == ("UDP", "10.0.0.1", 5353, "10.0.0.2", 53)
+
+    def test_reverse_direction_is_a_different_key(self):
+        forward = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=1111, dport=80))
+        reverse = build(Ether() / IP(src="10.0.0.2", dst="10.0.0.1") / TCP(sport=80, dport=1111))
+
+        assert Packet.flow_key_from_scapy(forward) != Packet.flow_key_from_scapy(reverse)
+
+    def test_non_tcp_udp_key_has_no_ports(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / ICMP())
+        assert Packet.flow_key_from_scapy(pkt) == (str(pkt[IP].proto), "10.0.0.1", None, "10.0.0.2", None)
+
+
+class TestFlowTracker:
+    def test_allows_inspection_up_to_the_budget(self):
+        tracker = FlowTracker(budget=2)
+        key = ("TCP", "10.0.0.1", 1111, "10.0.0.2", 80)
+
+        assert tracker.should_inspect(key) is True
+        assert tracker.should_inspect(key) is True
+
+    def test_dismisses_once_budget_is_spent(self):
+        tracker = FlowTracker(budget=2)
+        key = ("TCP", "10.0.0.1", 1111, "10.0.0.2", 80)
+
+        tracker.should_inspect(key)
+        tracker.should_inspect(key)
+
+        assert tracker.should_inspect(key) is False
+
+    def test_tracks_each_flow_key_independently(self):
+        tracker = FlowTracker(budget=1)
+        a = ("TCP", "10.0.0.1", 1111, "10.0.0.2", 80)
+        b = ("TCP", "10.0.0.3", 2222, "10.0.0.4", 443)
+
+        assert tracker.should_inspect(a) is True
+        assert tracker.should_inspect(b) is True  # separate budget from a
+        assert tracker.should_inspect(a) is False
+
+    def test_clears_when_max_flows_is_reached(self):
+        tracker = FlowTracker(budget=1, max_flows=2)
+        a = ("TCP", "10.0.0.1", 1111, "10.0.0.2", 80)
+        b = ("TCP", "10.0.0.3", 2222, "10.0.0.4", 443)
+        c = ("TCP", "10.0.0.5", 3333, "10.0.0.6", 443)
+
+        tracker.should_inspect(a)  # dict now at max_flows=2 after a and b
+        tracker.should_inspect(b)
+        tracker.should_inspect(c)  # forces a clear before recording c
+
+        # a's dismissal was lost in the clear, so it gets a fresh budget again
+        assert tracker.should_inspect(a) is True
 
 
 class TestSnifferDigest:
@@ -151,6 +215,35 @@ class TestSnifferDigest:
 
         assert result is None
         on_sus.assert_not_called()
+
+    def test_skips_dissection_and_rules_once_a_flows_budget_is_spent(self):
+        rule = Mock()
+        rule.check.return_value = None
+        on_sus = Mock()
+        sniffer = Sniffer(
+            interface="eth0", rules=[rule], on_sus=on_sus, flow_tracker=FlowTracker(budget=2)
+        )
+
+        for _ in range(5):
+            sniffer.digest(self._tcp_packet())  # same 5-tuple every time - one flow
+
+        assert rule.check.call_count == 2  # only the first 2 packets of the flow got inspected
+
+    def test_a_different_flow_gets_its_own_budget(self):
+        rule = Mock()
+        rule.check.return_value = None
+        on_sus = Mock()
+        sniffer = Sniffer(
+            interface="eth0", rules=[rule], on_sus=on_sus, flow_tracker=FlowTracker(budget=1)
+        )
+        other_flow_packet = build(
+            Ether() / IP(src="10.0.0.3", dst="10.0.0.4") / TCP(sport=2222, dport=443) / Raw(b"x")
+        )
+
+        sniffer.digest(self._tcp_packet())
+        sniffer.digest(other_flow_packet)
+
+        assert rule.check.call_count == 2  # each flow got its own budget's-worth of inspection
 
 
 class TestSnifferLifecycle:
