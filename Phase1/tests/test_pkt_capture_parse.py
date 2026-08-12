@@ -105,10 +105,14 @@ class TestSnifferDigest:
         on_sus = Mock()
         sniffer = Sniffer(interface="eth0", rules=[rule], on_sus=on_sus)
 
+        # digest() always returns None (returning the summary would make scapy's
+        # sniff(prn=...) auto-print it) - what we can actually verify is that a
+        # real Packet got built and handed to the rule.
         result = sniffer.digest(self._tcp_packet())
 
-        assert isinstance(result, Packet)
-        rule.check.assert_called_once_with(result)
+        assert result is None
+        (checked_packet,), _ = rule.check.call_args
+        assert isinstance(checked_packet, Packet)
         on_sus.assert_not_called()
 
     def test_calls_on_sus_when_rule_flags_an_alert(self):
@@ -121,7 +125,7 @@ class TestSnifferDigest:
         result = sniffer.digest(self._tcp_packet())
 
         on_sus.assert_called_once_with(alert)
-        assert result is not None
+        assert result is None  # digest() never surfaces the summary itself, only via on_sus
 
     def test_runs_every_rule_and_reports_each_alert(self):
         quiet_rule = Mock()
@@ -145,7 +149,7 @@ class TestSnifferDigest:
 
         result = sniffer.digest(self._tcp_packet())
 
-        assert isinstance(result, Packet)
+        assert result is None
         on_sus.assert_not_called()
 
 
@@ -179,10 +183,21 @@ class TestSnifferLifecycle:
         assert kwargs["iface"] == "wlan0"
         assert kwargs["prn"] == sniffer.digest
         assert kwargs["store"] is False
+        assert kwargs["filter"] is None  # no bpf_filter given - capture everything, as before
         assert callable(kwargs["stop_filter"])
         assert kwargs["stop_filter"](None) is False
         sniffer.end = True
         assert kwargs["stop_filter"](None) is True
+
+    def test_start_sniffer_passes_bpf_filter_through_to_scapy_sniff(self, monkeypatch):
+        fake_sniff = Mock()
+        monkeypatch.setattr("pkt_capture_parse.sniff", fake_sniff)
+        sniffer = Sniffer(interface="wlan0", rules=[], on_sus=Mock(), bpf_filter="ip and host 10.0.0.5")
+
+        sniffer.start_sniffer()
+
+        _, kwargs = fake_sniff.call_args
+        assert kwargs["filter"] == "ip and host 10.0.0.5"
 
     def test_stop_sets_end_and_joins_thread(self, monkeypatch):
         monkeypatch.setattr(Sniffer, "start_sniffer", lambda self: None)
