@@ -58,14 +58,6 @@ class ForwardPolicy:
     """Ensures the netfilter FORWARD chain's default policy is ACCEPT while
     spoofing is active, and puts it back on stop() - same record/restore shape
     as IpForwarder, but for the firewall policy rather than the sysctl.
-
-    ip_forward=1 only makes the kernel willing to route a packet between
-    interfaces; Netfilter's FORWARD chain still gets to accept or drop it
-    afterwards, and most distros (including Raspberry Pi OS/Debian) default
-    that chain's policy to DROP. Without this, poisoned traffic gets routed
-    correctly and then silently dropped right there - same-subnet traffic
-    looks fine since it never enters FORWARD, but anything off-subnet is
-    unreachable, which is exactly the "device drops" symptom this fixes.
     """
 
     def __init__(self, chain: str = "FORWARD", iptables_bin: str = IPTABLES_BIN):
