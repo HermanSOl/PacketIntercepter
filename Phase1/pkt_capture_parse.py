@@ -33,11 +33,13 @@ class Sniffer:
         rules: list[DetectionRule],
         on_sus: Callable[[SusAlert], None],
         on_error: Callable[[Exception], None] | None = None,
+        bpf_filter: str | None = None,
     ):
        self.interface = interface
        self.rules = rules
        self.on_sus = on_sus # function called on capture
        self.on_error = on_error
+       self.bpf_filter = bpf_filter
        self._thread: threading.Thread | None = None # needs a seperate thread apart from spoofing,etc.
        self._error: Exception | None = None
        self.end = False
@@ -51,7 +53,13 @@ class Sniffer:
     # For now, we won't store packages
     def start_sniffer(self):
         try:
-            sniff(iface = self.interface, prn = self.digest, store = False, stop_filter = lambda _: self.end)
+            sniff(
+                iface = self.interface,
+                prn = self.digest,
+                store = False,
+                filter = self.bpf_filter,
+                stop_filter = lambda _: self.end,
+            )
         except (PermissionError, OSError) as exc:
             # unknown/down interface, or not running with correct privileges
             self._handle_error(InterfaceError(f"Unable to sniff on interface {self.interface!r}: {exc}"))
