@@ -6,7 +6,7 @@ import time
 
 from arp_spoof import ArpSpoofer
 from detection_engine import AlertHandler, DnsRule, FtpRule, HttpRule, MailRule, TelnetRule, WeakTlsRule
-from ip_forward import IpForwarder, IpForwardError
+from ip_forward import ForwardPolicy, ForwardPolicyError, IpForwarder, IpForwardError
 from pkt_capture_parse import Sniffer
 
 logger = logging.getLogger(__name__)
@@ -55,10 +55,19 @@ def main() -> None:
     args = parse_args()
 
     handler = AlertHandler()
-    sniffer = Sniffer(interface=args.interface, rules=RULES, on_sus=handler.process_alert, on_error=on_sniff_error)
+    sniffer = Sniffer(
+        interface=args.interface,
+        rules=RULES,
+        on_sus=handler.process_alert,
+        on_error=on_sniff_error,
+        # Scope capture to the target's traffic in-kernel - keeps unrelated LAN
+        # devices out of both the alert feed and this thread's GIL usage.
+        bpf_filter=f"ip and host {args.target_ip}",
+    )
 
     spoofer = None
     forwarder = None
+    forward_policy = None
     if not args.no_spoof:
         spoofer = ArpSpoofer(
             interface=args.interface,
@@ -70,10 +79,13 @@ def main() -> None:
             on_error=on_spoof_error,
         )
         forwarder = IpForwarder()
+        forward_policy = ForwardPolicy()
         try:
             forwarder.enable()
-        except IpForwardError as exc:
-            print(f"[!] Could not enable IP forwarding, aborting before spoofing starts: {exc}")
+            forward_policy.enable()
+        except (IpForwardError, ForwardPolicyError) as exc:
+            forwarder.restore()  # in case forwarder.enable() succeeded and only forward_policy.enable() failed
+            print(f"[!] Could not enable packet forwarding, aborting before spoofing starts: {exc}")
             return
 
     print(f"Sniffing on {args.interface}... press Ctrl+C to stop.")
@@ -90,6 +102,8 @@ def main() -> None:
     finally:
         if spoofer:
             spoofer.stop()
+        if forward_policy:
+            forward_policy.restore()
         if forwarder:
             forwarder.restore()
         sniffer.stop()
