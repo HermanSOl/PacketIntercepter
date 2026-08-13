@@ -29,10 +29,6 @@ RULES = [
 ]
 
 
-# Scopes capture to target_ip's traffic on only the ports RULES can ever match
-# on, so bulk traffic on uninteresting ports/protocols (e.g. QUIC on udp/443)
-# never reaches the sniffer thread's Python callback. Falls back to no port
-# narrowing if any rule reports unrestricted ports (see DetectionRule.bpf_ports).
 def build_bpf_filter(target_ip: str, rules: list[DetectionRule]) -> str:
     protos_and_ports: set[tuple[str, int]] = set()
     for rule in rules:
