@@ -1,0 +1,54 @@
+[alerts]
+maxlen = 500  # how many recent alerts AlertHandler keeps before dropping the oldest
+
+[arp_spoof]
+interval = 2.5  # seconds between forged ARP replies; overridden by --interval if passed
+
+[flow_tracker]
+budget = 4       # packets fully inspected per flow direction before later ones are skipped
+max_flows = 50000  # tracked flows before the cache is cleared to bound memory growth
+
+[capture]
+# Optional raw BPF filter override - if set, bypasses build_bpf_filter() (the
+# rule-derived port narrowing) entirely and is passed to scapy as-is.
+# bpf_filter = "ip and host 192.168.1.50"
+
+[rules.http]
+enabled = true
+port = 80
+
+[rules.ftp]
+enabled = true
+control_port = 21
+credential_markers = ["USER ", "PASS "]
+
+[rules.telnet]
+enabled = true
+port = 23
+
+[rules.mail]
+enabled = true
+ports = { "25" = "SMTP", "110" = "POP3", "143" = "IMAP" }
+
+[rules.dns]
+enabled = true
+port = 53
+
+[rules.weak_tls]
+enabled = true
+bpf_ports = [443, 465, 587, 993, 995, 8443]
+# keys are the 2-byte TLS record version, hex-encoded without "0x"
+weak_versions = { "0301" = "TLS 1.0", "0302" = "TLS 1.1" }
+
+[rules.ldap]
+enabled = true
+port = 389
+
+[rules.snmp]
+enabled = true
+port = 161
+default_communities = ["public", "private"]
+
+[rules.rsync]
+enabled = true
+port = 873
