@@ -72,73 +72,89 @@ class RsyncAlert(SusAlert):
 
 # Plaintext HTTP traffic (port 80, no TLS)
 class HttpRule(DetectionRule):
-    PORT = 80
+    DEFAULT_PORT = 80
+
+    def __init__(self, port: int = DEFAULT_PORT):
+        self.port = port
 
     def check(self, pkt: Packet) -> SusAlert | None:
-        if pkt.protocol == "TCP" and self.PORT in (pkt.sport, pkt.dport):
-            return HttpAlert(pkt, "Plaintext HTTP on port 80 - content and any credentials are readable on the wire")
+        if pkt.protocol == "TCP" and self.port in (pkt.sport, pkt.dport):
+            return HttpAlert(pkt, f"Plaintext HTTP on port {self.port} - content and any credentials are readable on the wire")
         return None
 
     def bpf_ports(self):
-        return (("tcp", self.PORT),)
+        return (("tcp", self.port),)
 
 
 # FTP login sequence (USER/PASS sent in cleartext on the control channel)
 class FtpRule(DetectionRule):
-    CONTROL_PORT = 21
-    CREDENTIAL_MARKERS = (b"USER ", b"PASS ")
+    DEFAULT_CONTROL_PORT = 21
+    DEFAULT_CREDENTIAL_MARKERS = (b"USER ", b"PASS ")
+
+    def __init__(self, control_port: int = DEFAULT_CONTROL_PORT, credential_markers: tuple[bytes, ...] = DEFAULT_CREDENTIAL_MARKERS):
+        self.control_port = control_port
+        self.credential_markers = credential_markers
 
     def check(self, pkt: Packet) -> SusAlert | None:
-        if pkt.protocol != "TCP" or self.CONTROL_PORT not in (pkt.sport, pkt.dport):
+        if pkt.protocol != "TCP" or self.control_port not in (pkt.sport, pkt.dport):
             return None
-        if any(pkt.payload.startswith(marker) for marker in self.CREDENTIAL_MARKERS):
+        if any(pkt.payload.startswith(marker) for marker in self.credential_markers):
             return FtpAlert(pkt, "FTP USER/PASS sent in cleartext - credentials exposed")
         return None
 
     def bpf_ports(self):
-        return (("tcp", self.CONTROL_PORT),)
+        return (("tcp", self.control_port),)
 
 
 # Telnet session (entire session, including login, is cleartext)
 class TelnetRule(DetectionRule):
-    PORT = 23
+    DEFAULT_PORT = 23
+
+    def __init__(self, port: int = DEFAULT_PORT):
+        self.port = port
 
     def check(self, pkt: Packet) -> SusAlert | None:
-        if pkt.protocol == "TCP" and self.PORT in (pkt.sport, pkt.dport):
+        if pkt.protocol == "TCP" and self.port in (pkt.sport, pkt.dport):
             return TelnetAlert(pkt, "Telnet session - entire session including login is cleartext")
         return None
 
     def bpf_ports(self):
-        return (("tcp", self.PORT),)
+        return (("tcp", self.port),)
 
 
 # Unencrypted DNS query (plain port 53)
 class DnsRule(DetectionRule):
-    PORT = 53
+    DEFAULT_PORT = 53
+
+    def __init__(self, port: int = DEFAULT_PORT):
+        self.port = port
 
     def check(self, pkt: Packet) -> SusAlert | None:
-        if pkt.protocol == "UDP" and self.PORT in (pkt.sport, pkt.dport):
+        if pkt.protocol == "UDP" and self.port in (pkt.sport, pkt.dport):
             return DnsAlert(pkt, "Unencrypted DNS query - reveals browsing activity and is trivially spoofable")
         return None
 
     def bpf_ports(self):
-        return (("udp", self.PORT),)
+        return (("udp", self.port),)
 
 
 class MailRule(DetectionRule):
-    PORTS = {25: "SMTP", 110: "POP3", 143: "IMAP"}
+    DEFAULT_PORTS = {25: "SMTP", 110: "POP3", 143: "IMAP"}
+
+    def __init__(self, ports: dict[int, str] | None = None):
+        self.ports = dict(ports) if ports is not None else dict(self.DEFAULT_PORTS)
 
     def check(self, pkt: Packet) -> SusAlert | None:
         if pkt.protocol != "TCP":
             return None
         for port in (pkt.sport, pkt.dport):
-            name = self.PORTS.get(port)
+            name = self.ports.get(port)
             if name:
                 return MailAlert(pkt, f"Unencrypted {name} traffic - mail content/credentials exposed")
         return None
 
     def bpf_ports(self):
-        return tuple(("tcp", port) for port in self.PORTS)
+        return tuple(("tcp", port) for port in self.ports)
 
 
 ## This rule checks byte for byte to ensure that all of them are in place.
@@ -148,12 +164,16 @@ class WeakTlsRule(DetectionRule):
     CLIENT_HELLO = 0x01
     SERVER_HELLO = 0x02
     HELLO_TYPES = {CLIENT_HELLO: "ClientHello", SERVER_HELLO: "ServerHello"}
-    WEAK_VERSIONS = {
+    MIN_LEN = 11  # record header (5) + handshake header (4) + version (2)
+    DEFAULT_WEAK_VERSIONS = {
         b"\x03\x01": "TLS 1.0",
         b"\x03\x02": "TLS 1.1",
     }
-    MIN_LEN = 11  # record header (5) + handshake header (4) + version (2)
-    BPF_PORTS = (443, 465, 587, 993, 995, 8443)
+    DEFAULT_BPF_PORTS = (443, 465, 587, 993, 995, 8443)
+
+    def __init__(self, weak_versions: dict[bytes, str] | None = None, bpf_ports: tuple[int, ...] = DEFAULT_BPF_PORTS):
+        self.weak_versions = dict(weak_versions) if weak_versions is not None else dict(self.DEFAULT_WEAK_VERSIONS)
+        self._bpf_port_numbers = tuple(bpf_ports)
 
     def check(self, pkt: Packet) -> SusAlert | None:
         if pkt.protocol != "TCP" or len(pkt.payload) < self.MIN_LEN:
@@ -167,24 +187,27 @@ class WeakTlsRule(DetectionRule):
         if hello_name is None:
             return None
 
-        version_name = self.WEAK_VERSIONS.get(payload[9:11])
+        version_name = self.weak_versions.get(payload[9:11])
         if version_name is None:
             return None
 
         return WeakTlsAlert(pkt, f"{hello_name} proposes {version_name} - deprecated, vulnerable TLS version")
 
     def bpf_ports(self):
-        return tuple(("tcp", port) for port in self.BPF_PORTS)
+        return tuple(("tcp", port) for port in self._bpf_port_numbers)
 
 
 # LDAP simple bind.
 class LdapRule(DetectionRule):
-    PORT = 389
+    DEFAULT_PORT = 389
     BIND_REQUEST_TAG = 0x60  # APPLICATION 0, constructed - BindRequest PDU
     SIMPLE_AUTH_TAG = 0x80   # context-specific primitive 0 - "simple" auth choice
 
+    def __init__(self, port: int = DEFAULT_PORT):
+        self.port = port
+
     def check(self, pkt: Packet) -> SusAlert | None:
-        if pkt.protocol != "TCP" or self.PORT not in (pkt.sport, pkt.dport):
+        if pkt.protocol != "TCP" or self.port not in (pkt.sport, pkt.dport):
             return None
         bind_at = pkt.payload.find(bytes([self.BIND_REQUEST_TAG]))
         if bind_at == -1:
@@ -194,18 +217,22 @@ class LdapRule(DetectionRule):
         return None
 
     def bpf_ports(self):
-        return (("tcp", self.PORT),)
+        return (("tcp", self.port),)
 
 
 # SNMP using a default string
 class SnmpRule(DetectionRule):
-    PORT = 161
+    DEFAULT_PORT = 161
     DEFAULT_COMMUNITIES = (b"public", b"private")
 
+    def __init__(self, port: int = DEFAULT_PORT, default_communities: tuple[bytes, ...] = DEFAULT_COMMUNITIES):
+        self.port = port
+        self.default_communities = default_communities
+
     def check(self, pkt: Packet) -> SusAlert | None:
-        if pkt.protocol != "UDP" or self.PORT not in (pkt.sport, pkt.dport):
+        if pkt.protocol != "UDP" or self.port not in (pkt.sport, pkt.dport):
             return None
-        for community in self.DEFAULT_COMMUNITIES:
+        for community in self.default_communities:
             if community in pkt.payload:
                 return SnmpAlert(
                     pkt,
@@ -215,15 +242,18 @@ class SnmpRule(DetectionRule):
         return None
 
     def bpf_ports(self):
-        return (("udp", self.PORT),)
+        return (("udp", self.port),)
 
 
 # Rsync daemon traffic (port 873) - flagged by port alone, same as TelnetRule
 class RsyncRule(DetectionRule):
-    PORT = 873
+    DEFAULT_PORT = 873
+
+    def __init__(self, port: int = DEFAULT_PORT):
+        self.port = port
 
     def check(self, pkt: Packet) -> SusAlert | None:
-        if pkt.protocol == "TCP" and self.PORT in (pkt.sport, pkt.dport):
+        if pkt.protocol == "TCP" and self.port in (pkt.sport, pkt.dport):
             return RsyncAlert(
                 pkt,
                 "Rsync daemon traffic (port 873) - module may allow anonymous access "
@@ -232,7 +262,7 @@ class RsyncRule(DetectionRule):
         return None
 
     def bpf_ports(self):
-        return (("tcp", self.PORT),)
+        return (("tcp", self.port),)
 
 
 class AlertHandler:

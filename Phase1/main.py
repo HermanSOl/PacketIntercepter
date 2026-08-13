@@ -3,30 +3,21 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from pathlib import Path
 
 from arp_spoof import ArpSpoofer
-from detection_engine import (
-    AlertHandler,
-    DetectionRule,
-    DnsRule,
-    FtpRule,
-    HttpRule,
-    LdapRule,
-    MailRule,
-    RsyncRule,
-    SnmpRule,
-    TelnetRule,
-    WeakTlsRule,
-)
+from config import DEFAULT_CONFIG_PATH, build_rules, load_config
+from detection_engine import AlertHandler, DetectionRule
 from ip_forward import ForwardPolicy, ForwardPolicyError, IpForwarder, IpForwardError
-from pkt_capture_parse import Sniffer
+from pkt_capture_parse import FlowTracker, Sniffer
 
 logger = logging.getLogger(__name__)
 
-RULES = [
-    HttpRule(), FtpRule(), TelnetRule(), MailRule(), DnsRule(), WeakTlsRule(),
-    LdapRule(), SnmpRule(), RsyncRule(),
-]
+# The default rule set (every rule enabled, hardcoded defaults) - used when no
+# config.toml is present, and as the baseline TestBuildBpfFilter checks
+# against. main() builds the actual (possibly config-narrowed) rule list from
+# the loaded config instead of using this directly.
+RULES = build_rules({})
 
 
 def build_bpf_filter(target_ip: str, rules: list[DetectionRule]) -> str:
@@ -53,9 +44,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("gateway_ip", help="IP of the router/gateway")
     parser.add_argument("--target-mac", default=None, help="Skip ARP resolution if already known")
     parser.add_argument("--gateway-mac", default=None, help="Skip ARP resolution if already known")
-    parser.add_argument("--interval", type=float, default=2.5, help="Seconds between forged ARP replies")
+    parser.add_argument(
+        "--interval", type=float, default=None,
+        help="Seconds between forged ARP replies (default: config.toml's arp_spoof.interval, or 2.5)",
+    )
     parser.add_argument(
         "--no-spoof", action="store_true", help="Only sniff/detect - don't send forged ARP replies"
+    )
+    parser.add_argument(
+        "--config", default=None,
+        help=f"Path to a TOML tunables file (default: {DEFAULT_CONFIG_PATH} if present)",
     )
     return parser.parse_args()
 
@@ -84,13 +82,24 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
 
-    handler = AlertHandler()
+    # --config points at an explicit file (errors if missing); with no flag,
+    # config.toml next to main.py is used if present, else every tunable
+    # below just keeps its hardcoded default (config == {}).
+    config_path = Path(args.config) if args.config else DEFAULT_CONFIG_PATH
+    config = load_config(config_path, required=bool(args.config))
+
+    rules = build_rules(config)
+    interval = args.interval if args.interval is not None else config.get("arp_spoof", {}).get("interval", 2.5)
+    bpf_filter = config.get("capture", {}).get("bpf_filter") or build_bpf_filter(args.target_ip, rules)
+
+    handler = AlertHandler(**config.get("alerts", {}))
     sniffer = Sniffer(
         interface=args.interface,
-        rules=RULES,
+        rules=rules,
         on_sus=handler.process_alert,
         on_error=on_sniff_error,
-        bpf_filter=build_bpf_filter(args.target_ip, RULES),
+        bpf_filter=bpf_filter,
+        flow_tracker=FlowTracker(**config.get("flow_tracker", {})),
     )
 
     spoofer = None
@@ -103,7 +112,7 @@ def main() -> None:
             gateway_ip=args.gateway_ip,
             target_mac=args.target_mac,
             gateway_mac=args.gateway_mac,
-            interval=args.interval,
+            interval=interval,
             on_error=on_spoof_error,
         )
         forwarder = IpForwarder()
