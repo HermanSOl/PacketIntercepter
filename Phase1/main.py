@@ -5,13 +5,28 @@ import logging
 import time
 
 from arp_spoof import ArpSpoofer
-from detection_engine import AlertHandler, DetectionRule, DnsRule, FtpRule, HttpRule, MailRule, TelnetRule, WeakTlsRule
+from detection_engine import (
+    AlertHandler,
+    DetectionRule,
+    DnsRule,
+    FtpRule,
+    HttpRule,
+    LdapRule,
+    MailRule,
+    RsyncRule,
+    SnmpRule,
+    TelnetRule,
+    WeakTlsRule,
+)
 from ip_forward import ForwardPolicy, ForwardPolicyError, IpForwarder, IpForwardError
 from pkt_capture_parse import Sniffer
 
 logger = logging.getLogger(__name__)
 
-RULES = [HttpRule(), FtpRule(), TelnetRule(), MailRule(), DnsRule(), WeakTlsRule()]
+RULES = [
+    HttpRule(), FtpRule(), TelnetRule(), MailRule(), DnsRule(), WeakTlsRule(),
+    LdapRule(), SnmpRule(), RsyncRule(),
+]
 
 
 # Scopes capture to target_ip's traffic on only the ports RULES can ever match

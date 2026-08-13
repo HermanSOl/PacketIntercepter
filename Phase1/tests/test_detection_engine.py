@@ -10,8 +10,14 @@ from detection_engine import (
     FtpRule,
     HttpAlert,
     HttpRule,
+    LdapAlert,
+    LdapRule,
     MailAlert,
     MailRule,
+    RsyncAlert,
+    RsyncRule,
+    SnmpAlert,
+    SnmpRule,
     TelnetAlert,
     TelnetRule,
     WeakTlsAlert,
@@ -234,6 +240,90 @@ class TestWeakTlsRule:
         assert set(WeakTlsRule().bpf_ports()) == {
             ("tcp", 443), ("tcp", 465), ("tcp", 587), ("tcp", 993), ("tcp", 995), ("tcp", 8443),
         }
+
+
+class TestLdapRule:
+    def test_flags_simple_bind_on_control_port(self):
+        payload = b"\x30\x0c\x02\x01\x01" + b"\x60" + b"\x02\x01\x03" + b"\x80\x00"
+        pkt = make_packet(dport=389, payload=payload)
+        alert = LdapRule().check(pkt)
+
+        assert isinstance(alert, LdapAlert)
+        assert alert.pkt is pkt
+
+    def test_ignores_bind_without_simple_auth_tag(self):
+        payload = b"\x30\x0c\x02\x01\x01" + b"\x60" + b"\x02\x01\x03"
+        pkt = make_packet(dport=389, payload=payload)
+        assert LdapRule().check(pkt) is None
+
+    def test_ignores_traffic_without_bind_request_tag(self):
+        pkt = make_packet(dport=389, payload=b"\x30\x0c\x02\x01\x01\x61\x00")
+        assert LdapRule().check(pkt) is None
+
+    def test_ignores_traffic_on_other_ports(self):
+        payload = b"\x60\x80"
+        pkt = make_packet(dport=443, payload=payload)
+        assert LdapRule().check(pkt) is None
+
+    def test_ignores_udp_traffic_on_control_port(self):
+        pkt = make_packet(protocol="UDP", dport=389, payload=b"\x60\x80")
+        assert LdapRule().check(pkt) is None
+
+    def test_bpf_ports_is_tcp_389(self):
+        assert LdapRule().bpf_ports() == (("tcp", 389),)
+
+
+class TestSnmpRule:
+    def test_flags_public_community_string(self):
+        pkt = make_packet(protocol="UDP", dport=161, payload=b"\x30\x19\x02\x01\x00\x04\x06public")
+        alert = SnmpRule().check(pkt)
+
+        assert isinstance(alert, SnmpAlert)
+        assert alert.pkt is pkt
+        assert "public" in alert.reason
+
+    def test_flags_private_community_string(self):
+        pkt = make_packet(protocol="UDP", dport=161, payload=b"\x04\x07private")
+        assert isinstance(SnmpRule().check(pkt), SnmpAlert)
+
+    def test_ignores_non_default_community_string(self):
+        pkt = make_packet(protocol="UDP", dport=161, payload=b"\x04\x08corpnet1")
+        assert SnmpRule().check(pkt) is None
+
+    def test_ignores_traffic_on_other_ports(self):
+        pkt = make_packet(protocol="UDP", dport=53, payload=b"public")
+        assert SnmpRule().check(pkt) is None
+
+    def test_ignores_tcp_traffic_on_snmp_port(self):
+        pkt = make_packet(protocol="TCP", dport=161, payload=b"public")
+        assert SnmpRule().check(pkt) is None
+
+    def test_bpf_ports_is_udp_161(self):
+        assert SnmpRule().bpf_ports() == (("udp", 161),)
+
+
+class TestRsyncRule:
+    def test_flags_tcp_traffic_to_port_873(self):
+        pkt = make_packet(dport=873)
+        alert = RsyncRule().check(pkt)
+
+        assert isinstance(alert, RsyncAlert)
+        assert alert.pkt is pkt
+
+    def test_flags_tcp_traffic_from_port_873(self):
+        pkt = make_packet(sport=873, dport=54321)
+        assert isinstance(RsyncRule().check(pkt), RsyncAlert)
+
+    def test_ignores_tcp_traffic_on_other_ports(self):
+        pkt = make_packet(sport=1111, dport=443)
+        assert RsyncRule().check(pkt) is None
+
+    def test_ignores_udp_traffic_on_port_873(self):
+        pkt = make_packet(protocol="UDP", dport=873)
+        assert RsyncRule().check(pkt) is None
+
+    def test_bpf_ports_is_tcp_873(self):
+        assert RsyncRule().bpf_ports() == (("tcp", 873),)
 
 
 class TestDetectionRuleBpfPortsDefault:

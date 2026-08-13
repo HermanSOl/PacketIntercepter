@@ -56,6 +56,18 @@ class WeakTlsAlert(SusAlert):
     pass
 
 
+class LdapAlert(SusAlert):
+    pass
+
+
+class SnmpAlert(SusAlert):
+    pass
+
+
+class RsyncAlert(SusAlert):
+    pass
+
+
 # --- Rules ------------------------------------------------------------------
 
 # Plaintext HTTP traffic (port 80, no TLS)
@@ -141,10 +153,6 @@ class WeakTlsRule(DetectionRule):
         b"\x03\x02": "TLS 1.1",
     }
     MIN_LEN = 11  # record header (5) + handshake header (4) + version (2)
-
-    # For bpf_ports() only - check() stays port-agnostic. Without this list,
-    # main.build_bpf_filter() can't narrow the capture at all. Trade-off: TLS
-    # on a port not listed here won't be captured.
     BPF_PORTS = (443, 465, 587, 993, 995, 8443)
 
     def check(self, pkt: Packet) -> SusAlert | None:
@@ -167,6 +175,64 @@ class WeakTlsRule(DetectionRule):
 
     def bpf_ports(self):
         return tuple(("tcp", port) for port in self.BPF_PORTS)
+
+
+# LDAP simple bind.
+class LdapRule(DetectionRule):
+    PORT = 389
+    BIND_REQUEST_TAG = 0x60  # APPLICATION 0, constructed - BindRequest PDU
+    SIMPLE_AUTH_TAG = 0x80   # context-specific primitive 0 - "simple" auth choice
+
+    def check(self, pkt: Packet) -> SusAlert | None:
+        if pkt.protocol != "TCP" or self.PORT not in (pkt.sport, pkt.dport):
+            return None
+        bind_at = pkt.payload.find(bytes([self.BIND_REQUEST_TAG]))
+        if bind_at == -1:
+            return None
+        if bytes([self.SIMPLE_AUTH_TAG]) in pkt.payload[bind_at:]:
+            return LdapAlert(pkt, "LDAP simple bind - directory credentials sent in cleartext")
+        return None
+
+    def bpf_ports(self):
+        return (("tcp", self.PORT),)
+
+
+# SNMP using a default string
+class SnmpRule(DetectionRule):
+    PORT = 161
+    DEFAULT_COMMUNITIES = (b"public", b"private")
+
+    def check(self, pkt: Packet) -> SusAlert | None:
+        if pkt.protocol != "UDP" or self.PORT not in (pkt.sport, pkt.dport):
+            return None
+        for community in self.DEFAULT_COMMUNITIES:
+            if community in pkt.payload:
+                return SnmpAlert(
+                    pkt,
+                    f"SNMP using default community string {community.decode()!r} - "
+                    "full read/write access to the device if it's writable",
+                )
+        return None
+
+    def bpf_ports(self):
+        return (("udp", self.PORT),)
+
+
+# Rsync daemon traffic (port 873) - flagged by port alone, same as TelnetRule
+class RsyncRule(DetectionRule):
+    PORT = 873
+
+    def check(self, pkt: Packet) -> SusAlert | None:
+        if pkt.protocol == "TCP" and self.PORT in (pkt.sport, pkt.dport):
+            return RsyncAlert(
+                pkt,
+                "Rsync daemon traffic (port 873) - module may allow anonymous access "
+                "to the full filesystem tree; verify auth is configured",
+            )
+        return None
+
+    def bpf_ports(self):
+        return (("tcp", self.PORT),)
 
 
 class AlertHandler:
