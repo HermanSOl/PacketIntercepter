@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 
 IP_FORWARD_PATH = "/proc/sys/net/ipv4/ip_forward"
 IPTABLES_BIN = "iptables"
+SEND_REDIRECTS_PATH_TMPL = "/proc/sys/net/ipv4/conf/{scope}/send_redirects"
 
 
 class IpForwardError(Exception):
@@ -15,6 +16,10 @@ class IpForwardError(Exception):
 
 class ForwardPolicyError(Exception):
     """Raised when the netfilter FORWARD chain's default policy can't be read or set."""
+
+
+class RedirectPolicyError(Exception):
+    """Raised when a send_redirects sysctl can't be read or written."""
 
 
 class IpForwarder:
@@ -109,3 +114,45 @@ class ForwardPolicy:
         self._write_policy(self._original_policy)
         logger.info("%s chain policy restored to %r", self.chain, self._original_policy)
         self._original_policy = None
+
+
+class RedirectPolicy:
+    def __init__(self, interface: str, path_tmpl: str = SEND_REDIRECTS_PATH_TMPL):
+        self.interface = interface
+        self._paths = {"all": path_tmpl.format(scope="all"), interface: path_tmpl.format(scope=interface)}
+        self._original_values: dict[str, str] | None = None  # set by enable(), consumed by restore()
+
+    def _read(self, path: str) -> str:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except OSError as exc:
+            raise RedirectPolicyError(f"Failed to read {path!r}: {exc}") from exc
+
+    def _write(self, path: str, value: str) -> None:
+        try:
+            with open(path, "w") as f:
+                f.write(value)
+        except OSError as exc:
+            raise RedirectPolicyError(f"Failed to write {value!r} to {path!r}: {exc}") from exc
+
+    # Records whatever send_redirects was set to before we touch it, for each scope
+    def enable(self) -> None:
+        self._original_values = {scope: self._read(path) for scope, path in self._paths.items()}
+        for scope, path in self._paths.items():
+            if self._original_values[scope] == "0":
+                continue
+            self._write(path, "0")
+        logger.info("ICMP redirects disabled on all/%s (were %r)", self.interface, self._original_values)
+
+    # Puts send_redirects back to whatever it was before enable(), for each scope
+    def restore(self) -> None:
+        if self._original_values is None:
+            return
+        for scope, path in self._paths.items():
+            value = self._original_values[scope]
+            if value == "0":
+                continue
+            self._write(path, value)
+        logger.info("ICMP redirects restored to %r", self._original_values)
+        self._original_values = None

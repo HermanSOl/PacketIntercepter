@@ -8,7 +8,14 @@ from pathlib import Path
 from arp_spoof import ArpSpoofer
 from config import DEFAULT_CONFIG_PATH, build_rules, load_config
 from detection_engine import AlertHandler, DetectionRule
-from ip_forward import ForwardPolicy, ForwardPolicyError, IpForwarder, IpForwardError
+from ip_forward import (
+    ForwardPolicy,
+    ForwardPolicyError,
+    IpForwarder,
+    IpForwardError,
+    RedirectPolicy,
+    RedirectPolicyError,
+)
 from pkt_capture_parse import FlowTracker, Sniffer
 
 logger = logging.getLogger(__name__)
@@ -105,6 +112,7 @@ def main() -> None:
     spoofer = None
     forwarder = None
     forward_policy = None
+    redirect_policy = None
     if not args.no_spoof:
         spoofer = ArpSpoofer(
             interface=args.interface,
@@ -117,11 +125,17 @@ def main() -> None:
         )
         forwarder = IpForwarder()
         forward_policy = ForwardPolicy()
+        redirect_policy = RedirectPolicy(args.interface)
         try:
             forwarder.enable()
             forward_policy.enable()
-        except (IpForwardError, ForwardPolicyError) as exc:
-            forwarder.restore()  # in case forwarder.enable() succeeded and only forward_policy.enable() failed
+            redirect_policy.enable()
+        except (IpForwardError, ForwardPolicyError, RedirectPolicyError) as exc:
+            # in case an earlier step succeeded and a later one failed - each restore() is a
+            # no-op if its own enable() never got that far
+            redirect_policy.restore()
+            forward_policy.restore()
+            forwarder.restore()
             print(f"[!] Could not enable packet forwarding, aborting before spoofing starts: {exc}")
             return
 
@@ -139,6 +153,8 @@ def main() -> None:
     finally:
         if spoofer:
             spoofer.stop()
+        if redirect_policy:
+            redirect_policy.restore()
         if forward_policy:
             forward_policy.restore()
         if forwarder:
