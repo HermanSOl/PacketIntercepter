@@ -1,5 +1,24 @@
 <h1 style = 'color:teal'>Local network packet interceptor (MITM) through Raspberry Pi 5</h1>
 
+<h2>Quickstart</h2>
+
+Linux only (uses `/proc/sys/net/ipv4/ip_forward` and `iptables`), needs root to spoof/sniff.
+
+```
+git clone https://github.com/HermanSOl/PacketIntercepter.git
+cd PacketIntercepter
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+sudo venv/bin/python3 Phase1/main.py <interface> <target_ip> <gateway_ip>
+```
+
+Then open `http://127.0.0.1:5001` for the web UI (on by default; pass `--no-ui`
+for a terminal-only run with no Flask dependency). See `ui/README.md` for what the
+UI shows and `Phase1_description.md` for what the detection engine flags.
+
+Run the tests (no root needed): `(cd Phase1 && python3 -m pytest tests)` and
+`(cd ui && python3 -m pytest tests)` - each suite runs from its own directory.
+
 <h1>Goal:</h1>
 Build a tool on the Pi that performs active ARP spoofing (MITM) against one target device — my laptop — routing its traffic through the Pi to the real router, so I can inspect live traffic and flag insecure/exploitable protocols (plaintext HTTP, FTP, Telnet, unencrypted SMTP/IMAP/POP3, unencrypted DNS, weak/deprecated TLS versions in handshakes).
 
