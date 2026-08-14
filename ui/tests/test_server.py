@@ -1,10 +1,11 @@
-"""Tests for server.py - alert_to_dict()'s field mapping and the Flask routes."""
+"""Tests for server.py - alert_to_dict()/packet_to_dict()'s field mapping and the
+Flask routes."""
 from __future__ import annotations
 
-from server import alert_to_dict, create_app  # imported first - fixes up sys.path for Phase1's modules below
+from server import alert_to_dict, create_app, packet_to_dict  # fixes up sys.path for Phase1's modules below
 
 from detection_engine import AlertHandler, HttpAlert
-from pkt_capture_parse import Packet
+from pkt_capture_parse import LoggedPacket, Packet, PacketLog
 
 
 def make_packet(**overrides):
@@ -20,6 +21,10 @@ def make_packet(**overrides):
     )
     fields.update(overrides)
     return Packet(**fields)
+
+
+def make_app(handler=None, packet_log=None):
+    return create_app(handler or AlertHandler(), packet_log or PacketLog())
 
 
 class TestAlertToDict:
@@ -58,17 +63,61 @@ class TestAlertToDict:
         assert result["hostname"] is None
 
 
+class TestPacketToDict:
+    def test_plain_packet_is_not_flagged(self):
+        log = PacketLog()
+        logged = LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=make_packet())
+        log.process_packet(logged)
+
+        result = packet_to_dict(logged)
+
+        assert result["flagged"] is False
+        assert result["alerts"] == []
+
+    def test_flagged_packet_includes_its_alerts(self):
+        log = PacketLog()
+        pkt = make_packet()
+        alert = HttpAlert(pkt, "plaintext HTTP")
+        logged = LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=pkt, alerts=[alert])
+        log.process_packet(logged)
+
+        result = packet_to_dict(logged)
+
+        assert result["flagged"] is True
+        assert result["alerts"] == [{"type": "Http", "reason": "plaintext HTTP"}]
+
+    def test_has_detail_true_when_pkt_present(self):
+        logged = LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=make_packet())
+        result = packet_to_dict(logged)
+
+        assert result["has_detail"] is True
+        assert result["length"] == logged.pkt.length
+
+    def test_has_detail_false_and_blank_fields_beyond_budget(self):
+        # pkt=None - a packet logged past its flow's FlowTracker budget
+        logged = LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=None)
+
+        result = packet_to_dict(logged)
+
+        assert result["has_detail"] is False
+        assert result["length"] is None
+        assert result["hostname"] is None
+        # identity still present even without full detail
+        assert result["protocol"] == "TCP"
+        assert result["ip_src"] == "10.0.0.1"
+
+
 class TestRoutes:
     def test_index_serves_the_page(self):
-        client = create_app(AlertHandler()).test_client()
+        client = make_app().test_client()
 
         response = client.get("/")
 
         assert response.status_code == 200
-        assert b"Flagged Packets" in response.data
+        assert b"Packet Capture" in response.data
 
     def test_static_files_are_served(self):
-        client = create_app(AlertHandler()).test_client()
+        client = make_app().test_client()
 
         assert client.get("/app.js").status_code == 200
         assert client.get("/style.css").status_code == 200
@@ -76,7 +125,7 @@ class TestRoutes:
     def test_api_alerts_returns_processed_alerts_as_json(self):
         handler = AlertHandler()
         handler.process_alert(HttpAlert(make_packet(), "plaintext HTTP"))
-        client = create_app(handler).test_client()
+        client = make_app(handler=handler).test_client()
 
         response = client.get("/api/alerts")
 
@@ -87,8 +136,36 @@ class TestRoutes:
         assert body[0]["hostname"] == "example.com"
 
     def test_api_alerts_empty_when_no_alerts_yet(self):
-        client = create_app(AlertHandler()).test_client()
+        client = make_app().test_client()
 
-        response = client.get("/api/alerts")
+        assert client.get("/api/alerts").get_json() == []
 
-        assert response.get_json() == []
+    def test_api_packets_returns_logged_packets_as_json(self):
+        packet_log = PacketLog()
+        packet_log.process_packet(LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=make_packet()))
+        client = make_app(packet_log=packet_log).test_client()
+
+        response = client.get("/api/packets")
+
+        assert response.status_code == 200
+        body = response.get_json()
+        assert len(body) == 1
+        assert body[0]["protocol"] == "TCP"
+        assert body[0]["flagged"] is False
+
+    def test_api_packets_includes_flagged_packets(self):
+        packet_log = PacketLog()
+        pkt = make_packet()
+        alert = HttpAlert(pkt, "plaintext HTTP")
+        packet_log.process_packet(LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=pkt, alerts=[alert]))
+        client = make_app(packet_log=packet_log).test_client()
+
+        body = client.get("/api/packets").get_json()
+
+        assert body[0]["flagged"] is True
+        assert body[0]["alerts"][0]["reason"] == "plaintext HTTP"
+
+    def test_api_packets_empty_when_no_packets_yet(self):
+        client = make_app().test_client()
+
+        assert client.get("/api/packets").get_json() == []

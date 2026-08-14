@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from ip_forward import (
     RedirectPolicy,
     RedirectPolicyError,
 )
-from pkt_capture_parse import FlowTracker, Sniffer
+from pkt_capture_parse import FlowTracker, PacketLog, Sniffer
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ def main() -> None:
     bpf_filter = config.get("capture", {}).get("bpf_filter") or build_bpf_filter(args.target_ip, rules)
 
     handler = AlertHandler(**config.get("alerts", {}))
+    packet_log = PacketLog(**config.get("packet_log", {}))
     sniffer = Sniffer(
         interface=args.interface,
         rules=rules,
@@ -108,6 +110,7 @@ def main() -> None:
         on_error=on_sniff_error,
         bpf_filter=bpf_filter,
         flow_tracker=FlowTracker(**config.get("flow_tracker", {})),
+        packet_log=packet_log,
     )
 
     spoofer = None
@@ -141,14 +144,10 @@ def main() -> None:
             return
 
     if not args.no_ui:
-        # Local import - keeps Flask an optional dependency, only needed when the UI
-        # actually starts (i.e. --no-ui wasn't passed). ui/ lives outside Phase1/, so
-        # it needs the repo root on sys.path to be importable as a package at all.
-        import sys
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from ui.server import run_ui
 
-        run_ui(handler, port=args.ui_port)
+        run_ui(handler, packet_log, port=args.ui_port)
         print(f"UI available at http://127.0.0.1:{args.ui_port}")
 
     print(f"Sniffing on {args.interface}... press Ctrl+C to stop.")

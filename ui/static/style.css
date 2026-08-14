@@ -27,28 +27,36 @@ table {
   width: 100%;
 }
 
-#alert-table th,
-#alert-table td {
+#packet-table th,
+#packet-table td {
   border: 1px solid #ccc;
   padding: 2px 6px;
   text-align: left;
   white-space: nowrap;
 }
 
-#alert-table th {
+#packet-table th {
   background: #eee;
 }
 
-#alert-table tbody tr:hover {
+#packet-table tbody tr:hover {
   background: #f5f5f5;
   cursor: pointer;
 }
 
-#alert-table tbody tr.selected {
+#packet-table tbody tr.flagged {
+  background: #ffe0e0;
+}
+
+#packet-table tbody tr.flagged:hover {
+  background: #ffcccc;
+}
+
+#packet-table tbody tr.selected {
   background: #cde6ff;
 }
 
-#alert-table td.info {
+#packet-table td.info {
   white-space: normal;
 }
 

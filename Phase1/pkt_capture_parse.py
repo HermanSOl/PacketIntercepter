@@ -1,7 +1,9 @@
 from __future__ import annotations
 import logging
 import threading
-from dataclasses import dataclass
+import time
+from collections import deque
+from dataclasses import dataclass, field
 from typing import Callable, TYPE_CHECKING
 from scapy.all import sniff, Ether, IP, TCP, UDP, Raw
 
@@ -46,6 +48,36 @@ class FlowTracker:
         return True
 
 
+@dataclass
+class LoggedPacket:
+    protocol: str
+    ip_src: str
+    sport: int | None
+    ip_dst: str
+    dport: int | None
+    pkt: "Packet | None"
+    timestamp: float = field(default_factory=time.time)
+    id: int | None = None  # assigned by PacketLog.process_packet() - None until then
+    alerts: list["SusAlert"] = field(default_factory=list)
+
+
+class PacketLog:
+    def __init__(self, maxlen: int = 2000):
+        self.lock = threading.Lock()
+        self.packets: deque[LoggedPacket] = deque(maxlen=maxlen)
+        self._next_id = 0
+
+    def process_packet(self, logged: LoggedPacket) -> None:
+        with self.lock:
+            logged.id = self._next_id
+            self._next_id += 1
+            self.packets.append(logged)
+
+    def get_packets(self) -> list[LoggedPacket]:
+        with self.lock:
+            return list(self.packets)
+
+
 class Sniffer:
     def __init__(
         self,
@@ -55,6 +87,7 @@ class Sniffer:
         on_error: Callable[[Exception], None] | None = None,
         bpf_filter: str | None = None,
         flow_tracker: FlowTracker | None = None,
+        packet_log: PacketLog | None = None,
     ):
        self.interface = interface
        self.rules = rules
@@ -62,6 +95,7 @@ class Sniffer:
        self.on_error = on_error
        self.bpf_filter = bpf_filter
        self.flow_tracker = flow_tracker if flow_tracker is not None else FlowTracker()
+       self.packet_log = packet_log if packet_log is not None else PacketLog()
        self._thread: threading.Thread | None = None # needs a seperate thread apart from spoofing,etc.
        self._error: Exception | None = None
        self.end = False
@@ -101,29 +135,35 @@ class Sniffer:
     # Gets a structured summary of the packet, runs it through detection function, parses the summary and any sus alerts forward
     def digest(self, raw_packet) -> "Packet | None":
         flow_key = Packet.flow_key_from_scapy(raw_packet)
-        if flow_key is not None and not self.flow_tracker.should_inspect(flow_key):
-            return None  # flow's budget is spent - not worth re-dissecting
+        if flow_key is None:
+            return None  # not IP - the BPF filter should already exclude these
+        protocol, ip_src, sport, ip_dst, dport = flow_key
 
-        try:
-            packet_summary = Packet.sum_from_scapy(raw_packet)
-        except PacketParseError:
-            logger.exception("Failed to parse a captured packet; skipping it")
-            return None
-
-        if packet_summary is None:
-            return None
-
-        for rule in self.rules:
+        packet_summary = None
+        alerts: list[SusAlert] = []
+        if self.flow_tracker.should_inspect(flow_key):
             try:
-                alert = rule.check(packet_summary)
-            except Exception:
-                logger.exception("Detection rule %r raised while checking a packet; skipping it", rule)
-                continue
-            if alert:
-                try:
-                    self.on_sus(alert)
-                except Exception:
-                    logger.exception("on_sus handler raised while reporting an alert")
+                packet_summary = Packet.sum_from_scapy(raw_packet)
+            except PacketParseError:
+                logger.exception("Failed to parse a captured packet; skipping it")
+                packet_summary = None
+
+            if packet_summary is not None:
+                for rule in self.rules:
+                    try:
+                        alert = rule.check(packet_summary)
+                    except Exception:
+                        logger.exception("Detection rule %r raised while checking a packet; skipping it", rule)
+                        continue
+                    if alert:
+                        alerts.append(alert)
+                        try:
+                            self.on_sus(alert)
+                        except Exception:
+                            logger.exception("on_sus handler raised while reporting an alert")
+
+        logged = LoggedPacket(protocol, ip_src, sport, ip_dst, dport, packet_summary, alerts=alerts)
+        self.packet_log.process_packet(logged)
         return None
 
     def stop(self):
