@@ -36,3 +36,36 @@ class TestBuildBpfFilter:
         assert bpf_filter.startswith("ip and host 10.0.0.5 and (")
         assert "tcp port 443" in bpf_filter  # WeakTlsRule
         assert "udp port 53" in bpf_filter  # DnsRule
+
+    def test_excludes_given_ips_when_rules_narrow_the_filter(self):
+        bpf_filter = build_bpf_filter("10.0.0.5", [HttpRule()], exclude_ips=("10.0.0.1", "10.0.0.9"))
+
+        assert bpf_filter == (
+            "ip and host 10.0.0.5 and (not host 10.0.0.1 or udp port 53)"
+            " and (not host 10.0.0.9 or udp port 53) and (tcp port 80)"
+        )
+
+    def test_excludes_given_ips_when_unrestricted_rule_falls_back(self):
+        class UnrestrictedRule(DetectionRule):
+            def check(self, pkt):
+                return None
+
+        bpf_filter = build_bpf_filter("10.0.0.5", [UnrestrictedRule()], exclude_ips=("10.0.0.1",))
+
+        assert bpf_filter == "ip and host 10.0.0.5 and (not host 10.0.0.1 or udp port 53)"
+
+    def test_excludes_given_ips_for_an_empty_rule_list(self):
+        bpf_filter = build_bpf_filter("10.0.0.5", [], exclude_ips=("10.0.0.1",))
+
+        assert bpf_filter == "ip and host 10.0.0.5 and (not host 10.0.0.1 or udp port 53)"
+
+    def test_no_exclude_ips_leaves_filter_unchanged(self):
+        # exclude_ips=() (the default) - locks in that existing callers/tests above
+        # aren't relying on some now-removed default exclusion.
+        assert build_bpf_filter("10.0.0.5", [], exclude_ips=()) == build_bpf_filter("10.0.0.5", [])
+
+    def test_dns_to_an_excluded_ip_is_not_swept_up_by_the_exclusion(self):
+        # DnsRule needs to see this - see build_bpf_filter()'s comment for why.
+        bpf_filter = build_bpf_filter("10.0.0.5", [DnsRule()], exclude_ips=("10.0.0.1",))
+
+        assert bpf_filter == "ip and host 10.0.0.5 and (not host 10.0.0.1 or udp port 53) and (udp port 53)"
