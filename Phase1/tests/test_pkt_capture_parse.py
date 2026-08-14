@@ -25,7 +25,7 @@ from detection_engine import (
     WeakTlsAlert,
     WeakTlsRule,
 )
-from pkt_capture_parse import FlowTracker, Packet, Sniffer
+from pkt_capture_parse import FlowTracker, LoggedPacket, Packet, PacketLog, Sniffer
 
 
 def build(layer):
@@ -76,12 +76,48 @@ class TestPacketSumFromScapy: ## build a packet using scapy, run it through the 
 
         assert summary.mac_src == ""
         assert summary.mac_dst == ""
+        assert summary.eth_type is None
 
     def test_missing_raw_layer_yields_empty_payload(self):
         pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=1, dport=2))
         summary = Packet.sum_from_scapy(pkt)
 
         assert summary.payload == b""
+
+    def test_ip_and_ethernet_header_fields(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2", ttl=57, id=4321, flags="DF") / TCP(sport=1, dport=2))
+        summary = Packet.sum_from_scapy(pkt)
+
+        assert summary.length == len(pkt)
+        assert summary.eth_type == 0x0800
+        assert summary.ip_ttl == 57
+        assert summary.ip_id == 4321
+        assert summary.ip_flags == "DF"
+        assert summary.ip_proto_num == 6  # TCP
+        assert summary.ip_checksum == pkt[IP].chksum
+
+    def test_tcp_header_fields(self):
+        pkt = build(
+            Ether()
+            / IP(src="10.0.0.1", dst="10.0.0.2")
+            / TCP(sport=1, dport=2, seq=1000, ack=2000, flags="SA", window=64240)
+        )
+        summary = Packet.sum_from_scapy(pkt)
+
+        assert summary.tcp_seq == 1000
+        assert summary.tcp_ack == 2000
+        assert summary.tcp_flags == "SA"
+        assert summary.tcp_window == 64240
+
+    def test_udp_packet_has_no_tcp_header_fields(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / UDP(sport=1, dport=2))
+        summary = Packet.sum_from_scapy(pkt)
+
+        assert summary.tcp_seq is None
+        assert summary.tcp_ack is None
+        assert summary.tcp_window is None
+        assert summary.tcp_flags == ""
+        assert summary.ip_proto_num == 17  # UDP
 
 
 class TestPacketFlowKeyFromScapy:
@@ -146,6 +182,51 @@ class TestFlowTracker:
 
         # a's dismissal was lost in the clear, so it gets a fresh budget again
         assert tracker.should_inspect(a) is True
+
+
+class TestPacketLog:
+    def test_process_packet_stores_it(self):
+        log = PacketLog()
+        logged = LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=None)
+
+        log.process_packet(logged)
+
+        assert log.get_packets() == [logged]
+
+    def test_process_packet_assigns_increasing_ids(self):
+        log = PacketLog()
+        first = LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=None)
+        second = LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=None)
+
+        log.process_packet(first)
+        log.process_packet(second)
+
+        assert first.id == 0
+        assert second.id == 1
+
+    def test_get_packets_returns_a_copy(self):
+        log = PacketLog()
+        log.process_packet(LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=None))
+
+        snapshot = log.get_packets()
+        snapshot.append("not a real packet")
+
+        assert len(log.get_packets()) == 1
+
+    def test_maxlen_evicts_oldest_packet(self):
+        log = PacketLog(maxlen=2)
+        first = LoggedPacket("TCP", "10.0.0.1", 1, "10.0.0.2", 80, pkt=None)
+        second = LoggedPacket("TCP", "10.0.0.1", 2, "10.0.0.2", 80, pkt=None)
+        third = LoggedPacket("TCP", "10.0.0.1", 3, "10.0.0.2", 80, pkt=None)
+
+        for logged in (first, second, third):
+            log.process_packet(logged)
+
+        assert log.get_packets() == [second, third]
+
+    def test_logged_packet_defaults_to_no_alerts(self):
+        logged = LoggedPacket("TCP", "10.0.0.1", 1111, "10.0.0.2", 80, pkt=None)
+        assert logged.alerts == []
 
 
 class TestSnifferDigest:
@@ -244,6 +325,67 @@ class TestSnifferDigest:
         sniffer.digest(other_flow_packet)
 
         assert rule.check.call_count == 2  # each flow got its own budget's-worth of inspection
+
+    def test_logs_every_packet_even_when_no_rule_fires(self):
+        rule = Mock()
+        rule.check.return_value = None
+        sniffer = Sniffer(interface="eth0", rules=[rule], on_sus=Mock())
+
+        sniffer.digest(self._tcp_packet())
+
+        logged = sniffer.packet_log.get_packets()
+        assert len(logged) == 1
+        assert logged[0].protocol == "TCP"
+        assert logged[0].ip_src == "10.0.0.1"
+        assert logged[0].sport == 1111
+        assert logged[0].alerts == []
+
+    def test_logged_packet_carries_full_detail_when_inspected(self):
+        sniffer = Sniffer(interface="eth0", rules=[], on_sus=Mock())
+
+        sniffer.digest(self._tcp_packet())
+
+        logged = sniffer.packet_log.get_packets()[0]
+        assert isinstance(logged.pkt, Packet)
+
+    def test_logged_packet_has_no_full_detail_once_budget_is_spent(self):
+        sniffer = Sniffer(interface="eth0", rules=[], on_sus=Mock(), flow_tracker=FlowTracker(budget=1))
+
+        sniffer.digest(self._tcp_packet())  # spends the flow's only budget
+        sniffer.digest(self._tcp_packet())  # same flow - over budget
+
+        logged = sniffer.packet_log.get_packets()
+        assert logged[0].pkt is not None
+        assert logged[1].pkt is None
+        # still logged with its identity, just no header detail/payload
+        assert logged[1].protocol == "TCP"
+        assert logged[1].ip_src == "10.0.0.1"
+
+    def test_logged_packet_carries_the_alerts_raised_for_it(self):
+        alert = Mock(name="alert")
+        rule = Mock()
+        rule.check.return_value = alert
+        sniffer = Sniffer(interface="eth0", rules=[rule], on_sus=Mock())
+
+        sniffer.digest(self._tcp_packet())
+
+        logged = sniffer.packet_log.get_packets()[0]
+        assert logged.alerts == [alert]
+
+    def test_non_ip_packet_is_not_logged(self):
+        sniffer = Sniffer(interface="eth0", rules=[], on_sus=Mock())
+
+        sniffer.digest(build(Ether() / ARP()))
+
+        assert sniffer.packet_log.get_packets() == []
+
+    def test_uses_the_given_packet_log_instance(self):
+        packet_log = PacketLog()
+        sniffer = Sniffer(interface="eth0", rules=[], on_sus=Mock(), packet_log=packet_log)
+
+        sniffer.digest(self._tcp_packet())
+
+        assert len(packet_log.get_packets()) == 1
 
 
 class TestSnifferLifecycle:

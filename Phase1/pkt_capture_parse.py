@@ -1,7 +1,9 @@
 from __future__ import annotations
 import logging
 import threading
-from dataclasses import dataclass
+import time
+from collections import deque
+from dataclasses import dataclass, field
 from typing import Callable, TYPE_CHECKING
 from scapy.all import sniff, Ether, IP, TCP, UDP, Raw
 
@@ -41,11 +43,39 @@ class FlowTracker:
         if remaining <= 0:
             return False
         if flow_key not in self._remaining and len(self._remaining) >= self.max_flows:
-            # Bounds unbounded growth over a long session; just re-inspects
-            # already-dismissed flows
             self._remaining.clear()
         self._remaining[flow_key] = remaining - 1
         return True
+
+
+@dataclass
+class LoggedPacket:
+    protocol: str
+    ip_src: str
+    sport: int | None
+    ip_dst: str
+    dport: int | None
+    pkt: "Packet | None"
+    timestamp: float = field(default_factory=time.time)
+    id: int | None = None  # assigned by PacketLog.process_packet() - None until then
+    alerts: list["SusAlert"] = field(default_factory=list)
+
+
+class PacketLog:
+    def __init__(self, maxlen: int = 2000):
+        self.lock = threading.Lock()
+        self.packets: deque[LoggedPacket] = deque(maxlen=maxlen)
+        self._next_id = 0
+
+    def process_packet(self, logged: LoggedPacket) -> None:
+        with self.lock:
+            logged.id = self._next_id
+            self._next_id += 1
+            self.packets.append(logged)
+
+    def get_packets(self) -> list[LoggedPacket]:
+        with self.lock:
+            return list(self.packets)
 
 
 class Sniffer:
@@ -57,6 +87,7 @@ class Sniffer:
         on_error: Callable[[Exception], None] | None = None,
         bpf_filter: str | None = None,
         flow_tracker: FlowTracker | None = None,
+        packet_log: PacketLog | None = None,
     ):
        self.interface = interface
        self.rules = rules
@@ -64,6 +95,7 @@ class Sniffer:
        self.on_error = on_error
        self.bpf_filter = bpf_filter
        self.flow_tracker = flow_tracker if flow_tracker is not None else FlowTracker()
+       self.packet_log = packet_log if packet_log is not None else PacketLog()
        self._thread: threading.Thread | None = None # needs a seperate thread apart from spoofing,etc.
        self._error: Exception | None = None
        self.end = False
@@ -103,31 +135,35 @@ class Sniffer:
     # Gets a structured summary of the packet, runs it through detection function, parses the summary and any sus alerts forward
     def digest(self, raw_packet) -> "Packet | None":
         flow_key = Packet.flow_key_from_scapy(raw_packet)
-        if flow_key is not None and not self.flow_tracker.should_inspect(flow_key):
-            return None  # flow's budget is spent - not worth re-dissecting
+        if flow_key is None:
+            return None  # not IP - the BPF filter should already exclude these
+        protocol, ip_src, sport, ip_dst, dport = flow_key
 
-        try:
-            packet_summary = Packet.sum_from_scapy(raw_packet)
-        except PacketParseError:
-            logger.exception("Failed to parse a captured packet; skipping it")
-            return None
-
-        if packet_summary is None:
-            return None
-
-        for rule in self.rules:
+        packet_summary = None
+        alerts: list[SusAlert] = []
+        if self.flow_tracker.should_inspect(flow_key):
             try:
-                alert = rule.check(packet_summary)
-            except Exception:
-                logger.exception("Detection rule %r raised while checking a packet; skipping it", rule)
-                continue
-            if alert:
-                try:
-                    self.on_sus(alert)
-                except Exception:
-                    logger.exception("on_sus handler raised while reporting an alert")
-        # Returning packet_summary here would make scapy's sniff(prn=...) auto-print
-        # its repr() (raw payload bytes and all) for every packet - not what we want.
+                packet_summary = Packet.sum_from_scapy(raw_packet)
+            except PacketParseError:
+                logger.exception("Failed to parse a captured packet; skipping it")
+                packet_summary = None
+
+            if packet_summary is not None:
+                for rule in self.rules:
+                    try:
+                        alert = rule.check(packet_summary)
+                    except Exception:
+                        logger.exception("Detection rule %r raised while checking a packet; skipping it", rule)
+                        continue
+                    if alert:
+                        alerts.append(alert)
+                        try:
+                            self.on_sus(alert)
+                        except Exception:
+                            logger.exception("on_sus handler raised while reporting an alert")
+
+        logged = LoggedPacket(protocol, ip_src, sport, ip_dst, dport, packet_summary, alerts=alerts)
+        self.packet_log.process_packet(logged)
         return None
 
     def stop(self):
@@ -147,6 +183,17 @@ class Packet:
     sport: int | None
     dport: int | None
     payload: bytes
+    length: int = 0 
+    eth_type: int | None = None 
+    ip_ttl: int | None = None
+    ip_id: int | None = None
+    ip_flags: str = ""
+    ip_proto_num: int | None = None 
+    ip_checksum: int | None = None
+    tcp_seq: int | None = None
+    tcp_ack: int | None = None
+    tcp_flags: str = "" 
+    tcp_window: int | None = None
 
     @staticmethod
     def flow_key_from_scapy(raw_packet) -> tuple | None:
@@ -169,11 +216,18 @@ class Packet:
 
         try:
             ip_layer = raw_packet[IP]
+            tcp_seq = tcp_ack = tcp_window = None
+            tcp_flags = ""
 
             if raw_packet.haslayer(TCP):
                 protocol = "TCP"
-                sport = raw_packet[TCP].sport
-                dport = raw_packet[TCP].dport
+                tcp_layer = raw_packet[TCP]
+                sport = tcp_layer.sport
+                dport = tcp_layer.dport
+                tcp_seq = tcp_layer.seq
+                tcp_ack = tcp_layer.ack
+                tcp_flags = str(tcp_layer.flags)
+                tcp_window = tcp_layer.window
             elif raw_packet.haslayer(UDP):
                 protocol = "UDP"
                 sport = raw_packet[UDP].sport
@@ -185,6 +239,7 @@ class Packet:
 
             mac_src = raw_packet[Ether].src if raw_packet.haslayer(Ether) else ""
             mac_dst = raw_packet[Ether].dst if raw_packet.haslayer(Ether) else ""
+            eth_type = raw_packet[Ether].type if raw_packet.haslayer(Ether) else None
             payload = raw_packet[Raw].load if raw_packet.haslayer(Raw) else b""
 
             return cls(
@@ -196,6 +251,17 @@ class Packet:
                 sport=sport,
                 dport=dport,
                 payload=payload,
+                length=len(raw_packet),
+                eth_type=eth_type,
+                ip_ttl=ip_layer.ttl,
+                ip_id=ip_layer.id,
+                ip_flags=str(ip_layer.flags),
+                ip_proto_num=int(ip_layer.proto),
+                ip_checksum=ip_layer.chksum,
+                tcp_seq=tcp_seq,
+                tcp_ack=tcp_ack,
+                tcp_flags=tcp_flags,
+                tcp_window=tcp_window,
             )
         except Exception as exc:
             # Malformed/truncated packets are expected on the wire (since this packet might be  the attackers)

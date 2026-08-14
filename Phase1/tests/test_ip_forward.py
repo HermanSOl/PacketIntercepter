@@ -1,17 +1,33 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from ip_forward import ForwardPolicy, ForwardPolicyError, IpForwardError, IpForwarder
+from ip_forward import (
+    ForwardPolicy,
+    ForwardPolicyError,
+    IpForwardError,
+    IpForwarder,
+    RedirectPolicy,
+    RedirectPolicyError,
+)
 
 
 def make_forwarder(tmp_path, initial: str = "0"):
     path = tmp_path / "ip_forward"
     path.write_text(initial)
     return IpForwarder(path=str(path)), path
+
+
+def make_redirect_policy(tmp_path, interface: str = "eth0", all_initial: str = "1", iface_initial: str = "1"):
+    path_tmpl = str(tmp_path / "{scope}_send_redirects")
+    (tmp_path / "all_send_redirects").write_text(all_initial)
+    (tmp_path / f"{interface}_send_redirects").write_text(iface_initial)
+    policy = RedirectPolicy(interface, path_tmpl=path_tmpl)
+    return policy, policy._paths
 
 
 def fake_run(policy: str = "DROP"):
@@ -228,3 +244,82 @@ class TestForwardPolicyRestore:
         policy.restore()  # should not raise or write again
 
         assert state["policy"] == "DROP"
+
+
+class TestRedirectPolicyEnable:
+    def test_disables_redirects_on_all_and_interface_when_they_were_on(self, tmp_path):
+        policy, paths = make_redirect_policy(tmp_path, all_initial="1", iface_initial="1")
+
+        policy.enable()
+
+        assert Path(paths["all"]).read_text() == "0"
+        assert Path(paths["eth0"]).read_text() == "0"
+
+    def test_records_original_values_for_restore(self, tmp_path):
+        policy, _ = make_redirect_policy(tmp_path, all_initial="1", iface_initial="0")
+
+        policy.enable()
+
+        assert policy._original_values == {"all": "1", "eth0": "0"}
+
+    def test_leaves_redirects_untouched_when_already_off(self, tmp_path):
+        policy, paths = make_redirect_policy(tmp_path, all_initial="0", iface_initial="0")
+
+        policy.enable()
+
+        assert Path(paths["all"]).read_text() == "0"
+        assert Path(paths["eth0"]).read_text() == "0"
+
+    def test_wraps_read_failure_in_redirect_policy_error(self, tmp_path):
+        policy = RedirectPolicy("eth0", path_tmpl=str(tmp_path / "does_not_exist_{scope}"))
+
+        with pytest.raises(RedirectPolicyError):
+            policy.enable()
+
+    def test_wraps_write_failure_in_redirect_policy_error(self, tmp_path, monkeypatch):
+        policy, _ = make_redirect_policy(tmp_path, all_initial="1", iface_initial="1")
+        monkeypatch.setattr(policy, "_write", lambda path, value: (_ for _ in ()).throw(RedirectPolicyError("boom")))
+
+        with pytest.raises(RedirectPolicyError):
+            policy.enable()
+
+
+class TestRedirectPolicyRestore:
+    def test_restores_original_values_when_they_were_on(self, tmp_path):
+        policy, paths = make_redirect_policy(tmp_path, all_initial="1", iface_initial="1")
+        policy.enable()
+
+        policy.restore()
+
+        assert Path(paths["all"]).read_text() == "1"
+        assert Path(paths["eth0"]).read_text() == "1"
+
+    def test_does_nothing_when_enable_never_ran(self, tmp_path):
+        policy, paths = make_redirect_policy(tmp_path, all_initial="1", iface_initial="1")
+
+        policy.restore()
+
+        assert Path(paths["all"]).read_text() == "1"
+        assert Path(paths["eth0"]).read_text() == "1"
+
+    def test_does_nothing_when_it_was_already_off(self, tmp_path, monkeypatch):
+        policy, paths = make_redirect_policy(tmp_path, all_initial="0", iface_initial="0")
+        policy.enable()
+        write_calls = []
+        monkeypatch.setattr(policy, "_write", lambda path, value: write_calls.append((path, value)))
+
+        policy.restore()
+
+        assert write_calls == []
+        assert Path(paths["all"]).read_text() == "0"
+        assert Path(paths["eth0"]).read_text() == "0"
+
+    def test_is_idempotent(self, tmp_path):
+        policy, paths = make_redirect_policy(tmp_path, all_initial="1", iface_initial="1")
+        policy.enable()
+
+        policy.restore()
+        policy.restore()  # should not raise or write again
+
+        assert Path(paths["all"]).read_text() == "1"
+        assert Path(paths["eth0"]).read_text() == "1"

@@ -1,6 +1,9 @@
 [alerts]
 maxlen = 500  # how many recent alerts AlertHandler keeps before dropping the oldest
 
+[packet_log]
+maxlen = 2000  # how many recent packets PacketLog keeps (the UI's "all packets" view) before dropping the oldest
+
 [arp_spoof]
 interval = 2.5  # seconds between forged ARP replies; overridden by --interval if passed
 

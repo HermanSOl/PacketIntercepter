@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Packet Capture</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Packet Capture</h1>
+  <span id="status">connecting&hellip;</span>
+</header>
+
+<table id="packet-table">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Time</th>
+      <th>Source</th>
+      <th>Destination</th>
+      <th>Protocol</th>
+      <th>Length</th>
+      <th>Info</th>
+    </tr>
+  </thead>
+  <tbody id="packet-rows"></tbody>
+</table>
+
+<div id="detail" hidden>
+  <div id="detail-header">
+    <strong id="detail-title"></strong>
+    <button id="detail-close">close</button>
+  </div>
+  <table id="detail-fields"></table>
+  <div id="detail-hexdump"></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -3,16 +3,13 @@ from abc import ABC, abstractmethod
 from collections import deque
 from typing import TYPE_CHECKING
 import threading
+import time
 
 if TYPE_CHECKING:
-    # Only needed for type hints, not at runtime - avoids a circular import
-    # with pkt_capture_parse.py, which imports from this module too.
     from pkt_capture_parse import Packet
 
 
 class DetectionRule(ABC):
-    # Returns a SusAlert if pkt trips this rule's condition, else None.
-    # Each subclass decides for itself what it needs to look at in pkt.
     @abstractmethod
     def check(self, pkt: Packet) -> SusAlert | None:
         ...
@@ -28,6 +25,8 @@ class SusAlert:
     def __init__(self, pkt: Packet, reason: str):
         self.pkt = pkt
         self.reason = reason  # short, human-readable explanation for later display
+        self.timestamp = time.time()  # when the alert was raised, for later display/ordering
+        self.id: int | None = None  # assigned by AlertHandler.process_alert() - None until then
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.reason!r})"
@@ -200,8 +199,8 @@ class WeakTlsRule(DetectionRule):
 # LDAP simple bind.
 class LdapRule(DetectionRule):
     DEFAULT_PORT = 389
-    BIND_REQUEST_TAG = 0x60  # APPLICATION 0, constructed - BindRequest PDU
-    SIMPLE_AUTH_TAG = 0x80   # context-specific primitive 0 - "simple" auth choice
+    BIND_REQUEST_TAG = 0x60  
+    SIMPLE_AUTH_TAG = 0x80   
 
     def __init__(self, port: int = DEFAULT_PORT):
         self.port = port
@@ -269,9 +268,12 @@ class AlertHandler:
     def __init__(self, maxlen: int = 500):
         self.lock = threading.Lock()
         self.alerts: deque[SusAlert] = deque(maxlen=maxlen)
+        self._next_id = 0
 
     def process_alert(self, alert: SusAlert):
         with self.lock:
+            alert.id = self._next_id
+            self._next_id += 1
             self.alerts.append(alert)
 
     def get_alerts(self) -> list[SusAlert]:
