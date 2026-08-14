@@ -1,8 +1,13 @@
 # UI
 
 A local web page showing flagged packets as a Wireshark-style row list: one row per
-alert, click a row to see the full packet (addresses, MACs, reason, hex dump of the
-payload) below the table. Deliberately plain - no CSS framework, no build step.
+alert, click a row to see the full packet (addresses, MACs, header detail, hex dump of
+the payload) below the table. Deliberately plain - no CSS framework, no build step.
+
+Where a hostname can be recovered (an HTTP `Host:` header, or a TLS ClientHello's SNI
+extension - see `hostname.py`), it's shown next to the destination IP, e.g.
+`93.184.216.34 (example.com)`. This is display-only enrichment - it never changes
+what `WeakTlsRule`/`HttpRule` flag, only adds a hostname to what's already flagged.
 
 ## Run it against real traffic
 
@@ -38,6 +43,11 @@ Seeds a handful of demo alerts (one per rule type) and serves them at
   thread. One-way dependency on `Phase1/` (imports `detection_engine`), never the
   other way - `main.py` only imports this module unless `--no-ui` is passed, so a
   `--no-ui` run never needs Flask installed.
+- `hostname.py` - best-effort HTTP Host / TLS SNI extraction from a packet's payload.
+  Pure function of `(protocol, payload)`, no state, never raises (malformed/truncated
+  payloads just mean no hostname found).
 - `static/` - the page itself: `index.html` (table + detail pane), `app.js` (SSE
   client, row rendering, hex dump), `style.css` (borders and a monospace font, nothing
   more).
+
+Tests live in `ui/tests/`, run the same way as `Phase1/`'s: `cd ui && python3 -m pytest tests/`.

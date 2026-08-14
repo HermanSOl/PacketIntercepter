@@ -41,8 +41,6 @@ class FlowTracker:
         if remaining <= 0:
             return False
         if flow_key not in self._remaining and len(self._remaining) >= self.max_flows:
-            # Bounds unbounded growth over a long session; just re-inspects
-            # already-dismissed flows
             self._remaining.clear()
         self._remaining[flow_key] = remaining - 1
         return True
@@ -126,8 +124,6 @@ class Sniffer:
                     self.on_sus(alert)
                 except Exception:
                     logger.exception("on_sus handler raised while reporting an alert")
-        # Returning packet_summary here would make scapy's sniff(prn=...) auto-print
-        # its repr() (raw payload bytes and all) for every packet - not what we want.
         return None
 
     def stop(self):
@@ -147,6 +143,17 @@ class Packet:
     sport: int | None
     dport: int | None
     payload: bytes
+    length: int = 0 
+    eth_type: int | None = None 
+    ip_ttl: int | None = None
+    ip_id: int | None = None
+    ip_flags: str = ""
+    ip_proto_num: int | None = None 
+    ip_checksum: int | None = None
+    tcp_seq: int | None = None
+    tcp_ack: int | None = None
+    tcp_flags: str = "" 
+    tcp_window: int | None = None
 
     @staticmethod
     def flow_key_from_scapy(raw_packet) -> tuple | None:
@@ -169,11 +176,18 @@ class Packet:
 
         try:
             ip_layer = raw_packet[IP]
+            tcp_seq = tcp_ack = tcp_window = None
+            tcp_flags = ""
 
             if raw_packet.haslayer(TCP):
                 protocol = "TCP"
-                sport = raw_packet[TCP].sport
-                dport = raw_packet[TCP].dport
+                tcp_layer = raw_packet[TCP]
+                sport = tcp_layer.sport
+                dport = tcp_layer.dport
+                tcp_seq = tcp_layer.seq
+                tcp_ack = tcp_layer.ack
+                tcp_flags = str(tcp_layer.flags)
+                tcp_window = tcp_layer.window
             elif raw_packet.haslayer(UDP):
                 protocol = "UDP"
                 sport = raw_packet[UDP].sport
@@ -185,6 +199,7 @@ class Packet:
 
             mac_src = raw_packet[Ether].src if raw_packet.haslayer(Ether) else ""
             mac_dst = raw_packet[Ether].dst if raw_packet.haslayer(Ether) else ""
+            eth_type = raw_packet[Ether].type if raw_packet.haslayer(Ether) else None
             payload = raw_packet[Raw].load if raw_packet.haslayer(Raw) else b""
 
             return cls(
@@ -196,6 +211,17 @@ class Packet:
                 sport=sport,
                 dport=dport,
                 payload=payload,
+                length=len(raw_packet),
+                eth_type=eth_type,
+                ip_ttl=ip_layer.ttl,
+                ip_id=ip_layer.id,
+                ip_flags=str(ip_layer.flags),
+                ip_proto_num=int(ip_layer.proto),
+                ip_checksum=ip_layer.chksum,
+                tcp_seq=tcp_seq,
+                tcp_ack=tcp_ack,
+                tcp_flags=tcp_flags,
+                tcp_window=tcp_window,
             )
         except Exception as exc:
             # Malformed/truncated packets are expected on the wire (since this packet might be  the attackers)

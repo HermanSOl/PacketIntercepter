@@ -74,6 +74,12 @@ table {
   white-space: nowrap;
 }
 
+#detail-fields tr.section td {
+  padding-top: 0.6em;
+  font-weight: bold;
+  color: #333;
+}
+
 #detail-hexdump {
   margin-top: 0.5em;
   white-space: pre;

@@ -76,12 +76,48 @@ class TestPacketSumFromScapy: ## build a packet using scapy, run it through the 
 
         assert summary.mac_src == ""
         assert summary.mac_dst == ""
+        assert summary.eth_type is None
 
     def test_missing_raw_layer_yields_empty_payload(self):
         pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=1, dport=2))
         summary = Packet.sum_from_scapy(pkt)
 
         assert summary.payload == b""
+
+    def test_ip_and_ethernet_header_fields(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2", ttl=57, id=4321, flags="DF") / TCP(sport=1, dport=2))
+        summary = Packet.sum_from_scapy(pkt)
+
+        assert summary.length == len(pkt)
+        assert summary.eth_type == 0x0800
+        assert summary.ip_ttl == 57
+        assert summary.ip_id == 4321
+        assert summary.ip_flags == "DF"
+        assert summary.ip_proto_num == 6  # TCP
+        assert summary.ip_checksum == pkt[IP].chksum
+
+    def test_tcp_header_fields(self):
+        pkt = build(
+            Ether()
+            / IP(src="10.0.0.1", dst="10.0.0.2")
+            / TCP(sport=1, dport=2, seq=1000, ack=2000, flags="SA", window=64240)
+        )
+        summary = Packet.sum_from_scapy(pkt)
+
+        assert summary.tcp_seq == 1000
+        assert summary.tcp_ack == 2000
+        assert summary.tcp_flags == "SA"
+        assert summary.tcp_window == 64240
+
+    def test_udp_packet_has_no_tcp_header_fields(self):
+        pkt = build(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / UDP(sport=1, dport=2))
+        summary = Packet.sum_from_scapy(pkt)
+
+        assert summary.tcp_seq is None
+        assert summary.tcp_ack is None
+        assert summary.tcp_window is None
+        assert summary.tcp_flags == ""
+        assert summary.ip_proto_num == 17  # UDP
 
 
 class TestPacketFlowKeyFromScapy:

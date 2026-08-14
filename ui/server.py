@@ -7,10 +7,12 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "Phase1"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from flask import Flask, Response, jsonify, send_from_directory  
+from flask import Flask, Response, jsonify, send_from_directory
 
-from detection_engine import AlertHandler, SusAlert 
+from detection_engine import AlertHandler, SusAlert
+from hostname import extract_hostname
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -33,6 +35,18 @@ def alert_to_dict(alert: SusAlert) -> dict:
         "mac_dst": pkt.mac_dst,
         "payload_hex": pkt.payload.hex(),
         "payload_len": len(pkt.payload),
+        "length": pkt.length,
+        "eth_type": pkt.eth_type,
+        "ip_ttl": pkt.ip_ttl,
+        "ip_id": pkt.ip_id,
+        "ip_flags": pkt.ip_flags,
+        "ip_proto_num": pkt.ip_proto_num,
+        "ip_checksum": pkt.ip_checksum,
+        "tcp_seq": pkt.tcp_seq,
+        "tcp_ack": pkt.tcp_ack,
+        "tcp_flags": pkt.tcp_flags,
+        "tcp_window": pkt.tcp_window,
+        "hostname": extract_hostname(pkt.protocol, pkt.payload),
     }
 
 
@@ -49,8 +63,6 @@ def create_app(handler: AlertHandler) -> Flask:
 
     @app.get("/api/alerts")
     def get_alerts():
-        # Plain snapshot, mainly for curl/debugging - the page itself gets its
-        # data (initial backlog + live updates) from /api/stream alone.
         return jsonify([alert_to_dict(a) for a in handler.get_alerts()])
 
     @app.get("/api/stream")
@@ -71,9 +83,6 @@ def create_app(handler: AlertHandler) -> Flask:
 
 
 def run_ui(handler: AlertHandler, host: str = "127.0.0.1", port: int = 5000) -> threading.Thread:
-    """Starts the UI's Flask app in a daemon thread against the given (already-live)
-    AlertHandler and returns immediately - the caller doesn't need to join it.
-    """
     app = create_app(handler)
     thread = threading.Thread(
         target=lambda: app.run(host=host, port=port, threaded=True, use_reloader=False),
@@ -84,10 +93,6 @@ def run_ui(handler: AlertHandler, host: str = "127.0.0.1", port: int = 5000) -> 
 
 
 def _seed_demo_alerts(handler: AlertHandler) -> None:
-    """Fills a handler with a few fake alerts spanning every rule type, so the
-    frontend can be worked on without root/an interface/real traffic. Only used
-    by `python3 server.py` standalone below - never touched by run_ui() itself.
-    """
     from detection_engine import (
         DnsAlert,
         FtpAlert,
@@ -101,7 +106,23 @@ def _seed_demo_alerts(handler: AlertHandler) -> None:
     )
     from pkt_capture_parse import Packet
 
-    def pkt(sport, dport, protocol="TCP", payload=b""):
+    def client_hello_with_sni(host: bytes) -> bytes:
+        server_name = bytes([0]) + len(host).to_bytes(2, "big") + host
+        server_name_list = len(server_name).to_bytes(2, "big") + server_name
+        sni_ext = (0x0000).to_bytes(2, "big") + len(server_name_list).to_bytes(2, "big") + server_name_list
+        extensions = len(sni_ext).to_bytes(2, "big") + sni_ext
+        body = (
+            b"\x03\x03" + b"\x00" * 32  # client_version + random
+            + b"\x00"  # empty session_id
+            + b"\x00\x02" + b"\x00\x2f"  # one cipher suite
+            + b"\x01" + b"\x00"  # null compression
+            + extensions
+        )
+        handshake = bytes([0x01]) + len(body).to_bytes(3, "big") + body
+        return bytes([0x16]) + b"\x03\x01" + len(handshake).to_bytes(2, "big") + handshake
+
+    def pkt(sport, dport, protocol="TCP", payload=b"", seq=1000, ack=2000, flags="PA"):
+        header_len = 54 if protocol == "TCP" else 42  # Ether+IP+TCP vs Ether+IP+UDP, roughly
         return Packet(
             mac_src="aa:bb:cc:dd:ee:01",
             mac_dst="aa:bb:cc:dd:ee:02",
@@ -111,15 +132,34 @@ def _seed_demo_alerts(handler: AlertHandler) -> None:
             sport=sport,
             dport=dport,
             payload=payload,
+            length=header_len + len(payload),
+            eth_type=0x0800,
+            ip_ttl=64,
+            ip_id=12345,
+            ip_flags="DF",
+            ip_proto_num=6 if protocol == "TCP" else 17,
+            ip_checksum=0xABCD,
+            tcp_seq=seq if protocol == "TCP" else None,
+            tcp_ack=ack if protocol == "TCP" else None,
+            tcp_flags=flags if protocol == "TCP" else "",
+            tcp_window=64240 if protocol == "TCP" else None,
         )
 
+    http_payload = b"GET /login HTTP/1.1\r\nHost: example.com\r\nUser-Agent: curl/8.0\r\n\r\n"
+
     demo_alerts = [
-        HttpAlert(pkt(51000, 80), "Plaintext HTTP on port 80 - content and any credentials are readable on the wire"),
+        HttpAlert(
+            pkt(51000, 80, payload=http_payload),
+            "Plaintext HTTP on port 80 - content and any credentials are readable on the wire",
+        ),
         FtpAlert(pkt(51001, 21, payload=b"USER admin\r\n"), "FTP USER/PASS sent in cleartext - credentials exposed"),
         TelnetAlert(pkt(51002, 23), "Telnet session - entire session including login is cleartext"),
         DnsAlert(pkt(51003, 53, protocol="UDP"), "Unencrypted DNS query - reveals browsing activity and is trivially spoofable"),
         MailAlert(pkt(51004, 143), "Unencrypted IMAP traffic - mail content/credentials exposed"),
-        WeakTlsAlert(pkt(51005, 443), "ClientHello proposes TLS 1.0 - deprecated, vulnerable TLS version"),
+        WeakTlsAlert(
+            pkt(51005, 443, payload=client_hello_with_sni(b"weak-tls.example.com")),
+            "ClientHello proposes TLS 1.0 - deprecated, vulnerable TLS version",
+        ),
         LdapAlert(pkt(51006, 389), "LDAP simple bind - directory credentials sent in cleartext"),
         SnmpAlert(pkt(51007, 161, protocol="UDP"), "SNMP using default community string 'public' - full read/write access to the device if it's writable"),
         RsyncAlert(pkt(51008, 873), "Rsync daemon traffic (port 873) - module may allow anonymous access to the full filesystem tree; verify auth is configured"),
