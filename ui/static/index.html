@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flagged Packets</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Flagged Packets</h1>
+  <span id="status">connecting&hellip;</span>
+</header>
+
+<table id="alert-table">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Time</th>
+      <th>Source</th>
+      <th>Destination</th>
+      <th>Type</th>
+      <th>Info</th>
+    </tr>
+  </thead>
+  <tbody id="alert-rows"></tbody>
+</table>
+
+<div id="detail" hidden>
+  <div id="detail-header">
+    <strong id="detail-title"></strong>
+    <button id="detail-close">close</button>
+  </div>
+  <table id="detail-fields"></table>
+  <div id="detail-hexdump"></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

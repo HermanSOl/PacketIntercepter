@@ -1,6 +1,8 @@
 """Tests for detection_engine.py — HttpRule, FtpRule, and AlertHandler."""
 from __future__ import annotations
 
+import time
+
 from detection_engine import (
     AlertHandler,
     DetectionRule,
@@ -365,3 +367,38 @@ class TestAlertHandler:
             handler.process_alert(alert)
 
         assert handler.get_alerts() == [second, third]
+
+    def test_process_alert_assigns_increasing_ids(self):
+        handler = AlertHandler()
+        first = HttpAlert(make_packet(), "first")
+        second = HttpAlert(make_packet(), "second")
+
+        handler.process_alert(first)
+        handler.process_alert(second)
+
+        assert first.id == 0
+        assert second.id == 1
+
+    def test_ids_keep_increasing_across_eviction(self):
+        handler = AlertHandler(maxlen=2)
+        for reason in ("first", "second", "third"):
+            handler.process_alert(HttpAlert(make_packet(), reason))
+
+        ids = [alert.id for alert in handler.get_alerts()]
+
+        assert ids == [1, 2]
+
+
+class TestSusAlertTimestamp:
+    def test_alert_gets_a_timestamp_on_creation(self):
+        before = time.time()
+
+        alert = HttpAlert(make_packet(), "reason")
+
+        after = time.time()
+        assert before <= alert.timestamp <= after
+
+    def test_id_is_none_until_processed(self):
+        alert = HttpAlert(make_packet(), "reason")
+
+        assert alert.id is None

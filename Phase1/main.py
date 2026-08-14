@@ -20,10 +20,7 @@ from pkt_capture_parse import FlowTracker, Sniffer
 
 logger = logging.getLogger(__name__)
 
-# The default rule set (every rule enabled, hardcoded defaults) - used when no
-# config.toml is present, and as the baseline TestBuildBpfFilter checks
-# against. main() builds the actual (possibly config-narrowed) rule list from
-# the loaded config instead of using this directly.
+# default build here just in case no config
 RULES = build_rules({})
 
 
@@ -62,6 +59,14 @@ def parse_args() -> argparse.Namespace:
         "--config", default=None,
         help=f"Path to a TOML tunables file (default: {DEFAULT_CONFIG_PATH} if present)",
     )
+    parser.add_argument(
+        "--no-ui", action="store_true",
+        help="Don't serve the local web UI of flagged packets (it runs at "
+             "http://127.0.0.1:<--ui-port> by default - needs Flask)",
+    )
+    parser.add_argument(
+        "--ui-port", type=int, default=5001, help="Port for the web UI (default: 5001, ignored with --no-ui)"
+    )
     return parser.parse_args()
 
 
@@ -88,10 +93,6 @@ def print_summary(handler: AlertHandler) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
-
-    # --config points at an explicit file (errors if missing); with no flag,
-    # config.toml next to main.py is used if present, else every tunable
-    # below just keeps its hardcoded default (config == {}).
     config_path = Path(args.config) if args.config else DEFAULT_CONFIG_PATH
     config = load_config(config_path, required=bool(args.config))
 
@@ -138,6 +139,17 @@ def main() -> None:
             forwarder.restore()
             print(f"[!] Could not enable packet forwarding, aborting before spoofing starts: {exc}")
             return
+
+    if not args.no_ui:
+        # Local import - keeps Flask an optional dependency, only needed when the UI
+        # actually starts (i.e. --no-ui wasn't passed). ui/ lives outside Phase1/, so
+        # it needs the repo root on sys.path to be importable as a package at all.
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from ui.server import run_ui
+
+        run_ui(handler, port=args.ui_port)
+        print(f"UI available at http://127.0.0.1:{args.ui_port}")
 
     print(f"Sniffing on {args.interface}... press Ctrl+C to stop.")
     sniffer.start()
